@@ -1,0 +1,301 @@
+diff --git a/.vscode/settings.json b/.vscode/settings.json
+new file mode 100644
+index 0000000..b097515
+--- /dev/null
++++ b/.vscode/settings.json
+@@ -0,0 +1,5 @@
++{
++    "files.associations": {
++        "*.in": "cpp"
++    }
++}
+\ No newline at end of file
+diff --git a/src/device/all_reduce.h b/src/device/all_reduce.h
+index f6b6e9c..6561834 100644
+--- a/src/device/all_reduce.h
++++ b/src/device/all_reduce.h
+@@ -23,6 +23,10 @@ namespace {
+     int nelem;
+     int chunk;
+ 
++    // CCLInsight
++    unsigned long long cclinsight_chunk_time0, cclinsight_chunk_time1;
++    int chunk_iteration_cclinsight;
++
+     // Coverity reports that the callee treats &ring->next as an array.  However, due to the use of
+     // FanSymmetric<1>, only the first element is ever accessed, so it's fine.
+     // coverity[callee_ptr_arith:FALSE]
+@@ -39,12 +43,20 @@ namespace {
+         return r - (r >= nranks ? nranks : 0);
+       };
+ 
++      chunk_iteration_cclinsight = ((int)(elemOffset/loopCount));
++
+       // step 0: push data to next GPU
+       chunk = modRanks(ringIx + nranks - 1);
+       chunkOffset = chunk * chunkCount;
+       offset = gridOffset + elemOffset + chunkOffset;
+       nelem = (int)min(chunkCount, remCount - chunkOffset);
++      cclinsight_chunk_time0 = clock64();
+       prims.directSend(offset, offset, nelem);
++      cclinsight_chunk_time1 = clock64();
++      if (tid==0 && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++          d_messages_shared.timeValue[0][chunk_iteration_cclinsight] = cclinsight_chunk_time0;
++          d_messages_shared.timeValue[1][chunk_iteration_cclinsight] = cclinsight_chunk_time1; 
++      }
+ 
+       // k-2 steps: reduce and copy to next GPU
+       for (int j = 2; j < nranks; ++j) {
+@@ -52,7 +64,15 @@ namespace {
+         chunkOffset = chunk * chunkCount;
+         offset = gridOffset + elemOffset + chunkOffset;
+         nelem = (int)min(chunkCount, remCount - chunkOffset);
++        if (j == 2) cclinsight_chunk_time0 = clock64(); 
+         prims.directRecvReduceDirectSend(offset, offset, nelem);
++        if (j == 2){
++          cclinsight_chunk_time1 = clock64();
++          if (tid==0 && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++              d_messages_shared.timeValue[2][chunk_iteration_cclinsight] = cclinsight_chunk_time0;
++              d_messages_shared.timeValue[3][chunk_iteration_cclinsight] = cclinsight_chunk_time1; 
++          }
++        }
+       }
+ 
+       // step k-1: reduce this buffer and data, which will produce the final
+@@ -61,7 +81,13 @@ namespace {
+       chunkOffset = chunk * chunkCount;
+       offset = gridOffset + elemOffset + chunkOffset;
+       nelem = (int)min(chunkCount, remCount - chunkOffset);
++      cclinsight_chunk_time0 = clock64();
+       prims.directRecvReduceCopyDirectSend(offset, offset, nelem, /*postOp=*/true);
++      cclinsight_chunk_time1 = clock64();
++      if (tid==0 && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++          d_messages_shared.timeValue[4][chunk_iteration_cclinsight] = cclinsight_chunk_time0;
++          d_messages_shared.timeValue[5][chunk_iteration_cclinsight] = cclinsight_chunk_time1; 
++      }
+ 
+       // k-2 steps: copy to next GPU
+       for (int j = 1; j < nranks - 1; ++j) {
+@@ -69,7 +95,15 @@ namespace {
+         chunkOffset = chunk * chunkCount;
+         offset = gridOffset + elemOffset + chunkOffset;
+         nelem = (int)min(chunkCount, remCount - chunkOffset);
++        if (j == 1) cclinsight_chunk_time0 = clock64(); 
+         prims.directRecvCopyDirectSend(offset, offset, nelem);
++        if (j == 1){
++        cclinsight_chunk_time1 = clock64();
++          if (tid==0 && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++              d_messages_shared.timeValue[6][chunk_iteration_cclinsight] = cclinsight_chunk_time0;
++              d_messages_shared.timeValue[7][chunk_iteration_cclinsight] = cclinsight_chunk_time1; 
++          }
++        }
+       }
+ 
+       // Make final copy from buffer to dest.
+@@ -77,9 +111,15 @@ namespace {
+       chunkOffset = chunk * chunkCount;
+       offset = gridOffset + elemOffset + chunkOffset;
+       nelem = (int)min(chunkCount, remCount - chunkOffset);
+-
++      cclinsight_chunk_time0 = clock64(); 
+       prims.directRecv(offset, nelem);
++      cclinsight_chunk_time1 = clock64();
++      if (tid==0 && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++          d_messages_shared.timeValue[8][chunk_iteration_cclinsight] = cclinsight_chunk_time0;
++          d_messages_shared.timeValue[9][chunk_iteration_cclinsight] = cclinsight_chunk_time1; 
++      }
+     }
++    d_messages_shared.Chunk_numbers = chunk_iteration_cclinsight; 
+   }
+ 
+   template<typename T, typename RedOp, typename Proto>
+@@ -155,6 +195,11 @@ namespace {
+     size_t offset;
+     int nelem;
+     int nthreadsSplit;
++
++    // CCLInsight
++    unsigned long long cclinsight_reduce_chunk_time0, cclinsight_reduce_chunk_time1, cclinsight_broadcast_chunk_time0, cclinsight_broadcast_chunk_time1;
++    int chunk_iteration_cclinsight;
++
+     if (Proto::Id == NCCL_PROTO_SIMPLE) {
+       nthreadsSplit = nthreads/2;
+       if (nthreadsSplit >= 256) nthreadsSplit += 64;
+@@ -171,7 +216,15 @@ namespace {
+       for (size_t elemOffset = 0; elemOffset < channelCount; elemOffset += chunkCount) {
+         offset = gridOffset + elemOffset;
+         nelem = min(chunkCount, channelCount - elemOffset);
++
++        chunk_iteration_cclinsight = ((int)(elemOffset/chunkCount));
++        cclinsight_reduce_chunk_time0 = clock64();
+         prims.directRecvReduceCopyDirectSend(offset, offset, nelem, /*doPost=*/true);
++        cclinsight_reduce_chunk_time1 = clock64();
++        if (tid==0 && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++            d_messages_shared.timeValue[0][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time0;
++            d_messages_shared.timeValue[1][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time1; 
++        }
+       }
+     }
+     else if (tid < nthreadsSplit) {
+@@ -192,14 +245,28 @@ namespace {
+         for (size_t elemOffset = 0; elemOffset < channelCount; elemOffset += chunkCount) {
+           offset = gridOffset + elemOffset;
+           nelem = min(chunkCount, channelCount - elemOffset);
++          chunk_iteration_cclinsight = ((int)(elemOffset/chunkCount));
++          cclinsight_reduce_chunk_time0 = clock64();
+           prims.directSend(offset, offset, nelem);
++          cclinsight_reduce_chunk_time1 = clock64();
++          if (tid==0 && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++              d_messages_shared.timeValue[0][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time0;
++              d_messages_shared.timeValue[1][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time1; 
++          }
+         }
+       }
+       else {
+         for (size_t elemOffset = 0; elemOffset < channelCount; elemOffset += chunkCount) {
+           offset = gridOffset + elemOffset;
+           nelem = min(chunkCount, channelCount - elemOffset);
++          chunk_iteration_cclinsight = ((int)(elemOffset/chunkCount));
++          cclinsight_reduce_chunk_time0 = clock64();
+           prims.directRecvReduceDirectSend(offset, offset, nelem);
++          cclinsight_reduce_chunk_time1 = clock64();
++          if (tid==0 && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++              d_messages_shared.timeValue[0][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time0;
++              d_messages_shared.timeValue[1][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time1; 
++          }
+         }
+       }
+     }
+@@ -215,17 +282,32 @@ namespace {
+         for (size_t elemOffset = 0; elemOffset < channelCount; elemOffset += chunkCount) {
+           offset = gridOffset + elemOffset;
+           nelem = min(chunkCount, channelCount - elemOffset);
++          chunk_iteration_cclinsight = ((int)(elemOffset/chunkCount));
++          cclinsight_reduce_chunk_time0 = clock64();
+           prims.directRecv(offset, nelem);
++          cclinsight_reduce_chunk_time1 = clock64();
++          if (tid==nthreadsSplit && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++              d_messages_shared.timeValue[2][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time0;
++              d_messages_shared.timeValue[3][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time1; 
++          }
+         }
+       }
+       else {
+         for (size_t elemOffset = 0; elemOffset < channelCount; elemOffset += chunkCount) {
+           offset = gridOffset + elemOffset;
+           nelem = min(chunkCount, channelCount - elemOffset);
++          chunk_iteration_cclinsight = ((int)(elemOffset/chunkCount));
++          cclinsight_reduce_chunk_time0 = clock64();
+           prims.directRecvCopyDirectSend(offset, offset, nelem);
++          cclinsight_reduce_chunk_time1 = clock64();
++          if (tid==nthreadsSplit && chunk_iteration_cclinsight < CCLInsight_MAXLOG){
++              d_messages_shared.timeValue[2][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time0;
++              d_messages_shared.timeValue[3][chunk_iteration_cclinsight] = cclinsight_reduce_chunk_time1; 
++          }
+         }
+       }
+     }
++    d_messages_shared.Chunk_numbers = chunk_iteration_cclinsight; 
+   }
+ }
+ 
+diff --git a/src/device/common.cu b/src/device/common.cu
+index a8b5ed5..7a7e41b 100644
+--- a/src/device/common.cu
++++ b/src/device/common.cu
+@@ -22,3 +22,6 @@ __global__ void ncclDevKernel_Generic(ncclDevKernelArgs4K NCCL_GRID_CONSTANT con
+ }
+ 
+ __device__ void ncclDevFunc_Nop() {}
++
++
++__shared__ struct LogMessage_CCLInsight d_messages_shared;
+\ No newline at end of file
+diff --git a/src/device/common.h b/src/device/common.h
+index a2884b5..6c67a8a 100644
+--- a/src/device/common.h
++++ b/src/device/common.h
+@@ -23,6 +23,10 @@
+ #define NCCL_GRID_CONSTANT
+ #endif
+ 
++extern __shared__ struct LogMessage_CCLInsight d_messages_shared;
++
++extern __device__ uint64_t CCLInsight_channelId;
++
+ typedef void(*ncclDevFuncPtr_t)();
+ extern __device__ ncclDevFuncPtr_t const ncclDevFuncTable[];
+ 
+@@ -398,6 +402,13 @@ __device__ __forceinline__ void ncclKernelMain(struct ncclDevKernelArgs const* a
+     __syncthreads();
+   }
+   profiler(FINI);
++  
++  auto commAndCh = (ncclDevCommAndChannels*)ncclShmem.args.comm;
++  LogMessage_CCLInsight* globalBuf = commAndCh->comm.profBuf;
++
++  // copy the entire block‐local struct into the slot for this block
++  globalBuf[ncclShmem.channelId] = d_messages_shared;
++
+ }
+ 
+ __global__ void ncclDevKernel_Generic(ncclDevKernelArgs4K NCCL_GRID_CONSTANT const args4K);
+diff --git a/src/include/device.h b/src/include/device.h
+index 2c5ce10..e26a549 100644
+--- a/src/include/device.h
++++ b/src/include/device.h
+@@ -434,6 +434,7 @@ struct ncclDevComm {
+   // Profiler counters
+   struct ncclDevProfiler* workStarted/*[MAXCHANNELS]*/;
+   struct ncclDevProfiler* workCompleted/*[MAXCHANNELS]*/;
++  struct LogMessage_CCLInsight*   profBuf;  
+ };
+ 
+ struct alignas(16) ncclDevCommAndChannels {
+diff --git a/src/init.cc b/src/init.cc
+index af784c0..4c3d91a 100644
+--- a/src/init.cc
++++ b/src/init.cc
+@@ -1048,6 +1048,10 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
+     struct ncclTree* tree = &comm->channels[c].tree;
+     snprintf(line+strlen(line), 1023-strlen(line), " [%d] %d/%d/%d->%d->%d",
+         c, tree->down[0], tree->down[1], tree->down[2], rank, tree->up);
++    topo_cclinsight[c][0]=tree->up;
++    topo_cclinsight[c][1]=tree->down[0];
++    topo_cclinsight[c][2]=tree->down[1];
++    topo_cclinsight[c][3]=tree->down[2];
+     INFO(NCCL_GRAPH, "Ring %02d : %d -> %d -> %d", c, comm->channels[c].ring.prev, comm->rank, comm->channels[c].ring.next);
+   }
+   line[1023] = '\0';
+diff --git a/src/nccl.h.in b/src/nccl.h.in
+index 292a839..31debd4 100644
+--- a/src/nccl.h.in
++++ b/src/nccl.h.in
+@@ -290,6 +290,27 @@ typedef enum { ncclInt8       = 0, ncclChar       = 0,
+                ncclNumTypes   = 12
+ } ncclDataType_t;
+ 
++/* CCLInsight */
++
++#define CCLInsight_MAXLOG 64
++#define CCLInsight_REDUCE_BROADCAST_CHUNK 1
++#define CCLInsight_CHANNELS 32
++#define CCLInsight_PEERS 4
++
++// Determine the maximum number of messages
++const size_t DOUBLE_MAX_PRIMS = 10;
++
++struct LogMessage_CCLInsight {
++    unsigned long long timeValue[DOUBLE_MAX_PRIMS][CCLInsight_MAXLOG];
++    unsigned long long Chunk_numbers; 
++};
++
++extern struct LogMessage_CCLInsight* d_messages;
++
++extern int topo_cclinsight[CCLInsight_CHANNELS][CCLInsight_PEERS];
++
++#define GAUGE_GPU_FREQUENCY 1410
++
+ /* ncclScalarResidence_t: Location and dereferencing logic for scalar arguments. */
+ typedef enum {
+   /* ncclScalarDevice: The scalar is in device-visible memory and will be
