@@ -1,0 +1,3 @@
+[submodule "tools/autoccl"]
+	path = tools/autoccl
+	url = https://github.com/gbxu/autoccl

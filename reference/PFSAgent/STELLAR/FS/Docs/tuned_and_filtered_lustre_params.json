@@ -1,0 +1,185 @@
+{
+    "max_read_ahead_whole_mb": {
+        "description": {
+            "definition": "Controls the maximum size of a file in MiB that is read in its entirety upon access, regardless of the size of the read() call.",
+            "effect": "This parameter helps avoid multiple small read RPCs on relatively small files, which can be inefficient. By reading the entire file at once, it reduces the overhead associated with detecting sequential read patterns for small files.",
+            "additional_info": "The default value is the greater of 2 MiB or the size of one RPC, as given by max_pages_per_rpc. This parameter is useful for optimizing read performance on small files by reducing the number of RPCs needed.",
+            "range_description": "The value should be set to the greater of 2 MiB or the size of one RPC, as given by max_pages_per_rpc.",
+            "range_value_type": "int",
+            "range": {
+                "min": 2,
+                "max": "dependent(osc-max_pages_per_rpc)"
+            }
+        },
+        "path": "llite.*.max_read_ahead_whole_mb"
+    },
+    "max_read_ahead_per_file_mb": {
+        "description": {
+            "definition": "Controls the maximum number of megabytes (MiB) of data that should be prefetched by the client when sequential reads are detected on one file.",
+            "effect": "This parameter sets a limit on the amount of data that can be read ahead for a single file when sequential reads are detected. It helps optimize read performance by prefetching data into memory, reducing the need for network I/O when the data is requested by a process. The readahead is triggered after two or more sequential reads fail to be satisfied by the Linux buffer cache. The readahead size grows linearly until the per-file limit is reached.",
+            "additional_info": "The value of this parameter cannot exceed the value set for max_read_ahead_mb. To disable readahead for a file, set max_read_ahead_per_file_mb to 0. This parameter is useful for optimizing read performance on files with predictable access patterns.",
+            "range_description": "The value must be a positive integer representing the maximum number of megabytes to prefetch per file. It cannot exceed the value of max_read_ahead_mb.",
+            "range_value_type": "int",
+            "range": {
+                "min": 0,
+                "max": "dependent(max_read_ahead_mb)"
+            }
+        },
+        "path": "llite.*.max_read_ahead_per_file_mb"
+    },
+    "max_read_ahead_mb": {
+        "description": {
+            "definition": "The 'max_read_ahead_mb' parameter controls the maximum amount of data that can be prefetched into memory for all files during sequential reads.",
+            "effect": "This parameter enhances read performance by prefetching data into memory before it is requested by a process, reducing the delay caused by network I/O. It is particularly beneficial for applications that perform sequential reads, as it allows data to be available in memory when needed, improving access times.",
+            "additional_info": "To disable readahead, set 'max_read_ahead_mb' to 0. The parameter cannot exceed half of the client's RAM, ensuring that memory usage remains efficient and does not impact other operations.",
+            "range_description": "The value can be set between 0 and half of the client's RAM, measured in MiB.",
+            "range_value_type": "int",
+            "range": {
+                "min": 0,
+                "max": "expression(CLIENT_RAM / 2)"
+            }
+        },
+        "path": "llite.*.max_read_ahead_mb"
+    },
+    "statahead_max": {
+        "description": {
+            "definition": "Controls the maximum number of file attributes that will be prefetched by the directory statahead thread.",
+            "effect": "The statahead_max parameter enhances the performance of directory traversal operations by prefetching file metadata into memory. This reduces the delay associated with network I/O when commands like ls -l, du, and find are executed, as the necessary metadata is already available in memory. By increasing the statahead_max value, more file attributes can be prefetched, potentially improving performance for applications that require access to large directories.",
+            "additional_info": "To disable statahead, set statahead_max to zero. The directory statahead thread also prefetches file size/block attributes from the OSTs, controlled by the asynchronous glimpse lock (AGL) setting. Disabling statahead will also disable AGL.",
+            "range_description": "The valid range for statahead_max is from 0 to 512, where 0 disables statahead and 512 is the maximum number of file attributes that can be prefetched.",
+            "range_value_type": "int",
+            "range": {
+                "min": 0,
+                "max": 512
+            }
+        },
+        "path": "llite.*.statahead_max"
+    },
+    "stripesize": {
+        "description": {
+            "definition": "The 'stripesize' parameter in Lustre specifies the amount of data written to one Object Storage Target (OST) before moving to the next OST.",
+            "effect": "The stripe size affects the performance of I/O operations in the Lustre file system. A smaller stripe size may lead to inefficient I/O due to the Lustre file system sending 1MB chunks over the network, while a larger stripe size can improve performance for large files by allowing each client to have exclusive access to its own part of a file. However, excessively large stripe sizes can lead to longer lock hold times and contention during shared file access.",
+            "additional_info": "It is recommended to choose a stripe size that aligns with the application's write patterns. For sequential I/O using high-speed networks, a stripe size between 1 MB and 4 MB is generally optimal. The stripe size should be a multiple of 64 KB to avoid issues on platforms with smaller page sizes.",
+            "range_description": "The stripe size must be a multiple of 64 KB, with a practical minimum of 512 KB and a maximum of 4 GB.",
+            "range_value_type": "int",
+            "range": {
+                "min": 512,
+                "max": 4294967296
+            }
+        },
+        "path": "lov.*.stripesize"
+    },
+    "stripecount": {
+        "description": {
+            "definition": "The 'stripecount' parameter specifies the number of Object Storage Targets (OSTs) over which a file is striped in a Lustre file system.",
+            "effect": "Setting the 'stripecount' determines how many OSTs a file will be distributed across. A higher stripe count can improve performance by allowing parallel access to multiple OSTs, which is beneficial for high-bandwidth applications. However, it can also increase complexity and overhead, especially if the stripe count exceeds the number of available OSTs.",
+            "additional_info": "The 'stripecount' can be set to -1 to stripe across all available OSTs, but this may not always be desirable. The parameter lod.*.max_stripecount can be used to limit the real stripe count to a lower number than the OST count. If lod.*.max_stripecount is not 0, and the file stripe_count is -1, the real stripe count will be the minimum of the OST count and max_stripecount.",
+            "range_description": "The 'stripecount' can be set to any integer from -1 to the number of OSTs minus one. A value of -1 indicates striping across all available OSTs.",
+            "range_value_type": "int",
+            "range": {
+                "min": -1,
+                "max": "expression(OST_COUNT-1)"
+            }
+        },
+        "path": "lov.*.stripecount"
+    },
+    "max_mod_rpcs_in_flight": {
+        "description": {
+            "definition": "The max_mod_rpcs_in_flight parameter defines the maximum number of file system modifying RPCs that can be sent in parallel by a client to a MDT target.",
+            "effect": "Increasing the max_mod_rpcs_in_flight value can improve performance for metadata-intensive parallel applications by allowing more modifying RPCs to be processed concurrently. However, this will also increase memory usage on both the client and the MDS. The value must be less than the max_rpcs_in_flight value and less than or equal to the MDT max_mod_rpcs_per_client value.",
+            "additional_info": "Ensure that the max_mod_rpcs_in_flight value is set lower than the max_rpcs_in_flight value to avoid configuration errors. Monitoring the rpc_stats file can help determine if the current setting is optimal or if it should be increased to improve performance.",
+            "range_description": "The valid range is from 1 to 511, and it must be strictly less than the max_rpcs_in_flight value and less than or equal to the MDT max_mod_rpcs_per_client value.",
+            "range_value_type": "int",
+            "range": {
+                "min": 1,
+                "max": "dependent(mdc-max_rpcs_in_flight)"
+            }
+        },
+        "path": "mdc.*.max_mod_rpcs_in_flight"
+    },
+    "mdc-max_rpcs_in_flight": {
+        "description": {
+            "definition": "The mdc-max_rpcs_in_flight parameter defines the maximum number of metadata RPCs, both modifying and non-modifying, that can be sent in parallel by a client to a MDT target.",
+            "effect": "Increasing the number of metadata RPCs issued in parallel can improve the performance of metadata-intensive parallel applications. However, it will also consume more memory on the client and on the MDS.",
+            "additional_info": "The max_mod_rpcs_in_flight value must be strictly less than the max_rpcs_in_flight value. It must also be less or equal to the MDT max_mod_rpcs_per_client value. If these conditions are not met, the setting fails and an explicit message is written in the Lustre log.",
+            "range_description": "The valid range for this parameter is from 2 to 512, with a default setting of 8.",
+            "range_value_type": "int",
+            "range": {
+                "min": 2,
+                "max": 512
+            }
+        },
+        "path": "mdc.*.max_rpcs_in_flight"
+    },
+    "osc-max_rpcs_in_flight": {
+        "description": {
+            "definition": "The osc-max_rpcs_in_flight parameter defines the maximum number of concurrent Remote Procedure Calls (RPCs) that can be in flight from an Object Storage Client (OSC) to its corresponding Object Storage Target (OST).",
+            "effect": "Increasing the max_rpcs_in_flight value can improve small file I/O performance by allowing more RPCs to be processed concurrently, thus keeping the network busy and reducing wait times for RPC completion. However, setting this value too high may lead to increased memory usage and potential congestion on the network.",
+            "additional_info": "To maximize performance, it is recommended that the value for max_dirty_mb be at least 4 times the product of max_pages_per_rpc and max_rpcs_in_flight. This ensures that there is enough dirty data to form full RPCs, optimizing data transfer efficiency.",
+            "range_description": "The valid range for max_rpcs_in_flight is from 1 to 256, with a default value of 8 RPCs.",
+            "range_value_type": "int",
+            "range": {
+                "min": 1,
+                "max": 256
+            }
+        },
+        "path": "osc.*.max_rpcs_in_flight"
+    },
+    "osc-max_dirty_mb": {
+        "description": {
+            "definition": "Controls how many MiB of dirty data can be written into the client pagecache for writes by each OSC.",
+            "effect": "When the limit set by this parameter is reached, additional writes block until previously-cached data is written to the server. This helps manage the amount of data buffered on the client before being sent to the server, which can affect write performance and system memory usage.",
+            "additional_info": "To maximize performance, it is recommended that the value for max_dirty_mb be at least 4 times the product of max_pages_per_rpc and max_rpcs_in_flight. This ensures that enough data can be aggregated per OSC to form a full RPC, improving efficiency.",
+            "range_description": "Valid values are larger than 0 and smaller than the lesser of 2048 MiB or 1/4 of client RAM.",
+            "range_value_type": "int",
+            "range": {
+                "min": 1,
+                "max": "expression(min(2048, CLIENT_RAM / 4))"
+            }
+        },
+        "path": "osc.*.max_dirty_mb"
+    },
+
+    "mdc-max_dirty_mb": {
+        "description": {
+            "definition": "The `mdc-max_dirty_mb` parameter controls the maximum amount of dirty data (in MiB) that can be held in the client page cache for writes by each Metadata Client (MDC).",
+            "effect": "When the `mdc-max_dirty_mb` limit is reached, additional writes will block until previously cached data is written to the server. This ensures that the client does not hold onto too much unwritten data, which could lead to data loss in case of a client crash. Performance can suffer if the client cannot aggregate enough data to form a full RPC, unless the application is doing very large writes itself.",
+            "additional_info": "To maximize performance, it is recommended to set the `mdc-max_dirty_mb` value to at least 4 times the `max_pages_per_rpc` times the `max_rpcs_in_flight`. This ensures that there is enough buffer space to handle large write operations efficiently.",
+            "range_description": "The value must be larger than 0 and smaller than the lesser of 2048 MiB or 1/4 of client RAM.",
+            "range_value_type": "int",
+            "range": {
+                "min": 1,
+                "max": "expression(min(2048, CLIENT_RAM / 4))"
+            }
+        },
+        "path": "mdc.*.max_dirty_mb"
+    },
+    "osc-max_pages_per_rpc": {
+        "description": {
+            "definition": "The osc-max_pages_per_rpc parameter defines the maximum number of pages that can be sent in a single RPC request to the OST.",
+            "effect": "This parameter affects the size of the data payload in each RPC sent from the client to the OST. By adjusting this parameter, administrators can optimize the I/O performance by controlling how much data is packed into each RPC. A larger value can increase throughput by reducing the number of RPCs needed for large data transfers, while a smaller value might be beneficial for smaller data transfers or when network conditions favor smaller packets.",
+            "additional_info": "The upper limit of this parameter may also be constrained by the ofd.*.brw_size setting on the OSS, and it applies to all clients connected to that OST. It is also possible to specify a units suffix (e.g., max_pages_per_rpc=4M), so the RPC size can be set independently of the client PAGE_SIZE.",
+            "range_description": "The minimum value is one page, and the maximum value is 16 MiB (4096 pages on systems with PAGE_SIZE of 4 KiB)",
+            "range_value_type": "int",
+            "range": {
+                "min": 1,
+                "max": 4096
+            }
+        },
+        "path": "osc.*.max_pages_per_rpc"
+    },
+    "mdc-max_pages_per_rpc": {
+        "description": {
+            "definition": "The 'mdc-max_pages_per_rpc' parameter defines the maximum number of pages that can be sent in a single RPC request to the OST.",
+            "effect": "Increasing the 'mdc-max_pages_per_rpc' value allows more data to be packed into each I/O RPC, potentially improving throughput by reducing the number of RPCs needed for large data transfers. However, it may also increase memory usage on the client and server.",
+            "additional_info": "To maximize performance, it is recommended that the value for 'max_dirty_mb' be at least 4 times the 'max_pages_per_rpc' times 'max_rpcs_in_flight'. The upper limit of 'max_pages_per_rpc' may also be constrained by the 'ofd.*.brw_size' setting on the OSS.",
+            "range_description": "The minimum value is one page, and the maximum value is 16 MiB (4096 pages on systems with a PAGE_SIZE of 4 KiB).",
+            "range_value_type": "int",
+            "range": {
+                "min": 1,
+                "max": 4096
+            }
+        },
+        "path": "mdc.*.max_pages_per_rpc"
+    }
+}

@@ -1,0 +1,31 @@
+{
+    "mpi": {
+        "command": "mpiexec",
+        "ranks": "50",
+        "configuration": "-np 50 -env LD_PRELOAD /custom-install/hpc-tools/pnetcdf-1.13.0/install/lib/libpnetcdf.so:/custom-install/hpc-tools/hdf5-1.14.4-3/install/lib/libhdf5.so:/usr/local/lib/libdarshan.so"
+    },
+    "vol": {
+
+    },
+    "file-system": {
+    },
+    "directory": "/mnt/hasanfs/amrex_data",
+    "benchmarks": [
+        {
+            "benchmark": "amrex",
+            "file": "test.h5",
+            "configuration": {
+                "ncells": "64",
+                "max_grid_size": "8",
+                "nlevs": "1",
+                "ncomp": "24",
+                "nppc": "128",
+                "nplotfile": "8",
+                "nparticlefile": "2",
+                "sleeptime": "2",
+                "restart_check": "1",
+                "mode": "SYNC"
+            }
+        }
+    ]
+}

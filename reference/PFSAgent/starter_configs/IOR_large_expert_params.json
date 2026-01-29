@@ -1,0 +1,43 @@
+{
+    "mdc-max_rpcs_in_flight": {
+         "mdc-max_rpcs_in_flight": 512
+     },
+    "osc-max_rpcs_in_flight": {
+         "osc-max_rpcs_in_flight": 256
+     },
+     "max_mod_rpcs_in_flight": {
+         "max_mod_rpcs_in_flight": 511
+     },
+     "max_read_ahead_whole_mb": {
+         "max_read_ahead_whole_mb": 1024
+     },
+     "max_read_ahead_per_file_mb": {
+         "max_read_ahead_per_file_mb": 49152
+     },
+     "max_read_ahead_mb": {
+         "max_read_ahead_mb": 81920
+     },
+     "statahead_max": {
+         "statahead_max": 512
+     },
+     "mdc-max_pages_per_rpc": {
+         "mdc-max_pages_per_rpc": 1024
+     },
+     "osc-max_pages_per_rpc": {
+         "osc-max_pages_per_rpc": 1024
+     },
+     "mdc-max_dirty_mb": {
+         "mdc-max_dirty_mb": 2000
+     },
+     "osc-max_dirty_mb": {
+         "osc-max_dirty_mb": 2000
+     },
+     "stripe_settings": [
+         {
+             "path": "/mnt/lustrefs/ior_data",
+             "stripe_count": -1,
+             "stripe_size": "512M"
+         }
+     ]
+ }
+ 

@@ -1,0 +1,121 @@
+{
+    "stripe_settings": [{
+        "path": "/mnt/lustrefs",
+        "stripe_size": "1M",
+        "stripe_count": 1
+    }],
+    "at_history": {
+        "at_history": 600
+    },
+    "mdc-max_dirty_mb": {
+        "mdc-max_dirty_mb": 2000
+    },
+    "osc-max_dirty_mb": {
+        "osc-max_dirty_mb": 2000
+    },
+    "at_early_margin": {
+        "at_early_margin": 5
+    },
+    "at_extra": {
+        "at_extra": 30
+    },
+    "timeout": {
+        "timeout": 100
+    },
+    "at_max": {
+        "at_max": 600
+    },
+    "ping": {
+        "ping": "only on servers except MGS"
+    },
+    "mdc-max_rpcs_in_flight": {
+        "mdc-max_rpcs_in_flight": 8
+    },
+    "osc-max_rpcs_in_flight": {
+        "osc-max_rpcs_in_flight": 8
+    },
+    "active": {
+        "active": 1
+    },
+    "threads_min": {
+        "threads_min": 16
+    },
+    "threads_max": {
+        "threads_max": 192
+    },
+    "lru_size": {
+        "lru_size": 42
+    },
+    "lock_volume_factor": {
+        "lock_volume_factor": "not found"
+    },
+    "max_read_ahead_whole_mb": {
+        "max_read_ahead_whole_mb": 64
+    },
+    "max_read_ahead_per_file_mb": {
+        "max_read_ahead_per_file_mb": 256
+    },
+    "statfs_max_age": {
+        "statfs_max_age": 1
+    },
+    "max_read_ahead_mb": {
+        "max_read_ahead_mb": 1024
+    },
+    "checksum_pages": {
+        "checksum_pages": 1
+    },
+    "statahead_agl": {
+        "statahead_agl": 1
+    },
+    "read_ahead_range_kb": {
+        "read_ahead_range_kb": 1024
+    },
+    "lazystatfs": {
+        "lazystatfs": 1
+    },
+    "max_read_ahead_async_active": {
+        "max_read_ahead_async_active": 16
+    },
+    "statahead_running_max": {
+        "statahead_running_max": 16
+    },
+    "read_ahead_async_file_threshold_mb": {
+        "read_ahead_async_file_threshold_mb": 256
+    },
+    "statahead_max": {
+        "statahead_max": 32
+    },
+    "stripetype": {
+        "stripetype": 1
+    },
+    "stripesize": {
+        "stripesize": 1048576
+    },
+    "stripecount": {
+        "stripecount": 1
+    },
+    "max_mod_rpcs_in_flight": {
+        "max_mod_rpcs_in_flight": 7
+    },
+    "qos_prio_free": {
+        "qos_prio_free": "90%"
+    },
+    "qos_threshold_rr": {
+        "qos_threshold_rr": "5%"
+    },
+    "pinger_recov": {
+        "pinger_recov": 1
+    },
+    "checksum_type": {
+        "checksum_type": "t10ip4K"
+    },
+    "mdc-max_pages_per_rpc": {
+        "mdc-max_pages_per_rpc": 256
+    },
+    "osc-max_pages_per_rpc": {
+        "osc-max_pages_per_rpc": 256
+    },
+    "cur_grant_bytes": {
+        "cur_grant_bytes": 1887485951
+    }
+}

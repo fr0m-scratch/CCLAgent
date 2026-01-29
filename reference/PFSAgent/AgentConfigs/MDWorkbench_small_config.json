@@ -1,0 +1,122 @@
+{
+    "file system": "lustre",
+    "param_definitions": "tuned_and_filtered_lustre_params",
+    "template": "filtered-nb",
+    "Application": "MDWorkbench",
+    "Application_Config": "P400_D10_S2048_R3",
+    "Test_config": "P400_D10_S2048_R3",
+    "procs": 50,
+    "mpi_hostfile": "/etc/mpi/hostfile",
+    "mpi_flags": ["HYDRA_BINDING_POLICY scatter"],
+    "Darshan": {
+        "log_dir": "/mnt/lustrefs/darshan-logs",
+        "date_formatted_dir": true,
+        "darshan_preload_path": "/custom-install/hpc-tools/pnetcdf-1.13.0/install/lib/libpnetcdf.so:/custom-install/hpc-tools/hdf5-1.14.4-3/install/lib/libhdf5.so:/usr/local/lib/libdarshan.so"
+    },
+    "RuntimeAnalysis": {
+        "agential": true,
+        "analysis_dir": "/custom-install/STELLAR_RuntimeAnalysis"
+    },
+    "System": {
+        "Clients": [
+            "node0",
+            "node1",
+            "node2",
+            "node3",
+            "node4"
+        ],
+        "Servers": [
+            "server0",
+            "server1",
+            "server2",
+            "server3",
+            "server4"
+        ],
+        "MDS": [
+            "server0"
+        ],
+        "OSS": [
+            "server1",
+            "server2",
+            "server3",
+            "server4"
+        ],
+        "CLIENT_RAM": 187000,
+        "Client_ram_units": "MB",
+        "OST_PER_OSS": 1,
+        "Network": {
+            "type": "ethernet",
+            "speed": "10Gbs"
+        },
+        "MGS_HOST": "10.10.1.1",
+        "MGS_CONN_TYPE": "tcp",
+        "FS_NAME": "lustrefs",
+        "mount_root": "/mnt/lustrefs",
+        "Client_processor": {
+            "model": "Intel(R) Xeon(R) Silver 4114 CPU @ 2.20GHz",
+            "cores_per_socket": 10,
+            "threads_per_core": 2,
+            "sockets": 2,
+            "NUMA_nodes": 2
+        },
+        "Server_processor": {
+            "model": "Intel(R) Xeon(R) Silver 4114 CPU @ 2.20GHz",
+            "cores_per_socket": 10,
+            "threads_per_core": 2,
+            "sockets": 2,
+            "NUMA_nodes": 2
+        }
+    },
+    "Agent": {
+        "model": "anthropic/claude-3-7-sonnet-20250219",
+        "max_retries": 3,
+        "rate_limit": 20,
+        "tpm_limit": 2000000
+    },
+    "RAG": {
+        "Tuning_knowledge_index": {  
+            "enabled": true,
+            "source_data_dir": "",
+            "index_dir": "",
+            "embedding_model": "text-embedding-3-large",
+            "reset_index": false
+        },
+        "Lustre_manual_index": {
+            "source_data_dir": "LustreManualIndex/data/md_manual",
+            "index_dir": "LustreManualIndex/index",
+            "embedding_model": "text-embedding-3-large",
+            "reset_index": false
+        }
+    },
+    "Application_Configs": {
+        "IO500": {
+            "root_dir": "/custom-install/benchmarks/io500",
+            "data_dir": "/mnt/lustrefs/io500/datafiles",
+            "results_dir": "/mnt/lustrefs/io500_results"
+        },
+        "MDWorkbench": {
+            "root_dir": "/custom-install/benchmarks/io500/bin",
+            "data_dir": "/mnt/lustrefs/mdworkbench_data",
+            "results_dir": "/custom-install/benchmarks/mdworkbench_results"
+        },
+        "IOR": {
+            "root_dir": "/custom-install/benchmarks/io500/bin",
+            "data_dir": "/mnt/lustrefs/ior_data",
+            "results_dir": "/mnt/lustrefs/ior_results"
+        },
+        "H5Bench": {
+            "root_dir": "/custom-install/benchmarks/h5bench",
+            "data_dir": "/mnt/lustrefs/hb_data",
+            "results_dir": "/mnt/lustrefs/hb_results"
+        }
+    },
+    "Debug": {
+        "use_debug_settings": false
+    },
+    "Logging": {
+        "log_dir": "/custom-install/py_logs/",
+        "log_level": "DEBUG"
+    }
+    
+
+}
