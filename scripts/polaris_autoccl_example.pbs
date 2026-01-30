@@ -1,0 +1,68 @@
+#!/bin/bash -l
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=00:30:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -q debug
+#PBS -A <PROJECT>
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR}"
+
+# Load your Python/PyTorch environment here if needed.
+# Example:
+# module load conda
+# conda activate <env>
+
+export MPICH_GPU_SUPPORT_ENABLED=1
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
+AUTOCCL_ROOT="${ROOT_DIR}/tools/autoccl"
+EXAMPLE_DIR="${AUTOCCL_ROOT}/ext-tuner/example/example/cuda/pytorch"
+NCCL_HOME="${AUTOCCL_ROOT}/build"
+TUNER_HOME="${AUTOCCL_ROOT}/ext-tuner/example/build"
+
+if [[ ! -f "${EXAMPLE_DIR}/demo.py" ]]; then
+  echo "Missing demo.py at ${EXAMPLE_DIR}/demo.py" >&2
+  exit 1
+fi
+if [[ ! -f "${NCCL_HOME}/lib/libnccl.so" ]]; then
+  echo "Missing AutoCCL NCCL build at ${NCCL_HOME}/lib/libnccl.so" >&2
+  exit 1
+fi
+if [[ ! -f "${TUNER_HOME}/libnccl-plugin.so" ]]; then
+  echo "Missing AutoCCL tuner plugin at ${TUNER_HOME}/libnccl-plugin.so" >&2
+  exit 1
+fi
+
+NNODES=$(wc -l < "${PBS_NODEFILE}")
+NRANKS_PER_NODE=$(nvidia-smi -L | wc -l | tr -d ' ')
+WORLD_SIZE=$((NNODES * NRANKS_PER_NODE))
+COORD_HOST=$(head -n 1 "${PBS_NODEFILE}")
+
+export TUNER_MAXCHANNELS="${TUNER_MAXCHANNELS:-32}"
+export TUNER_P2P_NCHANNELS="${TUNER_P2P_NCHANNELS:-2}"
+export TUNER_WHITELIST_CASES_FILE="${TUNER_WHITELIST_CASES_FILE:-${EXAMPLE_DIR}/whitelistcases.txt}"
+export TUNER_WHITELIST_RULES_FILE="${TUNER_WHITELIST_RULES_FILE:-${EXAMPLE_DIR}/whitelistrules.txt}"
+export NCCL_TIMEOUT="${NCCL_TIMEOUT:-3600}"
+export TUNER_PRETRAIN_STEPS="${TUNER_PRETRAIN_STEPS:-360}"
+export TUNER_TRAIN_STEPS="${TUNER_TRAIN_STEPS:-240}"
+export TUNER_PROFILE_REPEAT="${TUNER_PROFILE_REPEAT:-5}"
+export TUNER_COORDINATOR="${TUNER_COORDINATOR:-${COORD_HOST}:12449}"
+export TUNER_WORLDSIZE="${TUNER_WORLDSIZE:-$WORLD_SIZE}"
+export NCCL_TUNER_PLUGIN="${NCCL_TUNER_PLUGIN:-${TUNER_HOME}/libnccl-plugin.so}"
+export LD_PRELOAD="${NCCL_HOME}/lib/libnccl.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+export LD_LIBRARY_PATH="${NCCL_HOME}/lib:${TUNER_HOME}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export MASTER_ADDR="${MASTER_ADDR:-${COORD_HOST}}"
+export MASTER_PORT="${MASTER_PORT:-29500}"
+
+cd "${EXAMPLE_DIR}"
+
+mpiexec -n "${NNODES}" --ppn 1 --cpu-bind none bash -lc \
+  "torchrun --nnodes ${NNODES} --node_rank \${PMI_RANK} \
+   --nproc_per_node ${NRANKS_PER_NODE} \
+   --rdzv_backend c10d --rdzv_endpoint ${MASTER_ADDR}:${MASTER_PORT} \
+   demo.py"

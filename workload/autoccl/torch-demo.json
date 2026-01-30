@@ -1,0 +1,20 @@
+{
+  "name": "agent-torchrun-demo",
+  "kind": "training",
+  "command": ["bash", "scripts/agent_torchrun_demo.sh"],
+  "nodes": 1,
+  "topology": "local-gpu",
+  "scale": "single-node",
+  "env": {
+    "NCCL_TIMEOUT": "3600",
+    "TUNER_PRETRAIN_STEPS": "360",
+    "TUNER_TRAIN_STEPS": "240",
+    "TUNER_PROFILE_REPEAT": "5"
+  },
+  "metadata": {
+    "model": "AutoCCL demo (torchrun)",
+    "category": "microbench",
+    "framework": "PyTorch",
+    "source": "tools/autoccl/ext-tuner/example/example/cuda/pytorch/demo.py"
+  }
+}

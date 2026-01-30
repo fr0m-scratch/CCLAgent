@@ -1,0 +1,18 @@
+{
+  "name": "autoccl-phi2-2b",
+  "kind": "training",
+  "command": [],
+  "nodes": 4,
+  "topology": "a40-pcie-8gpu",
+  "scale": "32-gpu",
+  "env": {},
+  "metadata": {
+    "model": "Phi-2-2B",
+    "category": "llm",
+    "parallelism": "TP(8)+DP(4)",
+    "collectives": ["AllGather", "ReduceScatter", "AllReduce"],
+    "cluster": "4-node, 32xA40, PCIe intra, 100Gbps IB",
+    "framework": "PyTorch + Megatron-LM",
+    "source": "AutoCCL NSDI'25 evaluation"
+  }
+}
