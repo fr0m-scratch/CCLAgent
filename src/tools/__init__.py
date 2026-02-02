@@ -1,5 +1,5 @@
 from .autoccl import AutoCCLBridge, AutoCCLCandidateProvider, AutoCCLRuntimeConfig
-from .base import Tool, ToolResult
+from .base import Tool, ToolResult, ToolExecutionError
 from .config_compiler import CompileResult, ConfigCompiler
 from .ext_net import ExtNetBridge, ExtNetConfig
 from .ext_tuner import ExtTunerBridge, ExtTunerRuntimeConfig
@@ -19,6 +19,7 @@ __all__ = [
     "AutoCCLRuntimeConfig",
     "Tool",
     "ToolResult",
+    "ToolExecutionError",
     "CompileResult",
     "ConfigCompiler",
     "ExtNetBridge",

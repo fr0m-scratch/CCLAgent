@@ -11,6 +11,10 @@ class ToolResult:
     error: str | None = None
 
 
+class ToolExecutionError(RuntimeError):
+    pass
+
+
 class Tool:
     name = "tool"
 

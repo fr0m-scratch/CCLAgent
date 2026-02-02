@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "model_type": "rf",
+  "trained_at": "2026-02-02T16:59:39.814248Z",
+  "record_count": 9,
+  "dataset_fingerprint": "8e61b019e4504de267fdc7f238a10028",
+  "validation": {
+    "mae": 59.82092994726065,
+    "rmse": 70.64725753963975,
+    "count": 2
+  }
+}

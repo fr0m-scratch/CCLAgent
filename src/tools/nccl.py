@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, List
 
 from ..types import NCCLConfig
 from .config_compiler import ConfigCompiler
@@ -12,6 +12,7 @@ class NCCLApplyResult:
     ok: bool
     env: Dict[str, str]
     errors: list[str]
+    warnings: list[str]
 
 
 class NCCLInterface:
@@ -20,4 +21,4 @@ class NCCLInterface:
 
     def apply(self, config: NCCLConfig) -> NCCLApplyResult:
         result = self.compiler.compile(config)
-        return NCCLApplyResult(ok=result.ok, env=result.env, errors=result.errors)
+        return NCCLApplyResult(ok=result.ok, env=result.env, errors=result.errors, warnings=result.warnings)

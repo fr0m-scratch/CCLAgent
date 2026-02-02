@@ -1,0 +1,42 @@
+{
+  "action": {
+    "config": {
+      "NCCL_ALGO": "RING",
+      "NCCL_BUFFSIZE": 4194304,
+      "NCCL_IB_QPS_PER_CONNECTION": 1,
+      "NCCL_MAX_NCHANNELS": 8,
+      "NCCL_MIN_NCHANNELS": 4,
+      "NCCL_NET_GDR_LEVEL": 1,
+      "NCCL_NSOCKS_PERTHREAD": 2,
+      "NCCL_NTHREADS": 256,
+      "NCCL_P2P_LEVEL": "SYS",
+      "NCCL_PROTO": "SIMPLE",
+      "NCCL_SHM_DISABLE": false,
+      "NCCL_SOCKET_NTHREADS": 2
+    },
+    "delta": {},
+    "kind": "initial",
+    "rationale": "initial plan"
+  },
+  "metrics": {
+    "algbw_gbps": 138.0,
+    "busbw_gbps": 124.2,
+    "comm_time_ms": 426.40000000000003,
+    "error_budget": null,
+    "failure_reason": null,
+    "iteration_time_ms": 1066.0,
+    "loss": null,
+    "raw": {
+      "seed": 12978238,
+      "simulated": true,
+      "sla_ok": true,
+      "sla_rollback": false,
+      "sla_severity": "soft",
+      "sla_violations": []
+    },
+    "schema_version": "1.0",
+    "success": true,
+    "throughput": null
+  },
+  "step": 0
+}

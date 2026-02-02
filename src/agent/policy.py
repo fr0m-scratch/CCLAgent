@@ -52,19 +52,19 @@ class DecisionPolicy:
         microbench: MicrobenchResult,
         context: ContextSignature,
     ) -> NCCLConfig:
-        rules = self.memory.get_rules(context)
+        rules = self.memory.retrieve_rules(context, top_k=1)
         if rules:
             patch = rules[0].config_patch
             new_params = dict(state.best_record.action.config.params)
             new_params.update(patch)
             return NCCLConfig(params=new_params, metadata={"source": "rule"})
 
-        focus = microbench.important_params or list(self.parameter_space.specs.keys())
+        focus = [ip.param for ip in microbench.important_params] or list(self.parameter_space.specs.keys())
         new_params = self._mutate_best(state, focus)
         return NCCLConfig(params=new_params, metadata={"source": "heuristic"})
 
     def _numeric_step(self, state: TuningState, microbench: MicrobenchResult) -> NCCLConfig:
-        focus = microbench.important_params or list(self.parameter_space.specs.keys())
+        focus = [ip.param for ip in microbench.important_params] or list(self.parameter_space.specs.keys())
         best_config = state.best_record.action.config if state.best_record else NCCLConfig()
 
         suggest = getattr(self.surrogate, "suggest", None)
@@ -84,7 +84,7 @@ class DecisionPolicy:
                     base_config=best_config,
                     focus_params=focus,
                     parameter_space=self.parameter_space,
-                    scorer=self.surrogate.predict,
+                    scorer=lambda cfg: self.surrogate.predict_one(cfg).mean,
                     budget=self.config.budget.max_steps,
                 )
                 if isinstance(result, SearchResult):
@@ -96,7 +96,7 @@ class DecisionPolicy:
         for _ in range(3):
             mutated = self._mutate_best(state, focus)
             candidate = NCCLConfig(params=mutated)
-            score = self.surrogate.predict(candidate, default=1.0)
+            score = self.surrogate.predict_one(candidate).mean
             candidates.append((score, candidate))
         candidates.sort(key=lambda item: item[0])
         return candidates[0][1]

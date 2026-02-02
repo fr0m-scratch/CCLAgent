@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 
 from .agent import CCLAgent
-from .config import default_agent_config, load_agent_config, load_workload_spec
+from .config import config_to_dict, default_agent_config, load_agent_config, load_workload_spec
 from .llm import create_llm_client
 from .memory import MemoryStore
 from .RAG import RagStore
@@ -17,6 +17,7 @@ from .tools import (
     NCCLInterface,
     NcclTestConfig,
     NcclTestRunner,
+    NumericSearchConfig,
     NumericSearchTool,
     SLAEnforcer,
     ToolSuite,
@@ -25,26 +26,39 @@ from .tools import (
     WorkloadRunConfig,
     WorkloadRunner,
 )
-from .types import WorkloadSpec
-from .utils import setup_logger
+from .types import RunContext, WorkloadSpec
+from .utils import artifact_path, create_run_context, setup_logger, write_json
 
 
 logger = setup_logger("cclagent.cli")
 
 
-def build_tools(config, dry_run: bool) -> ToolSuite:
-    metrics = MetricsCollector()
-    microbench = MicrobenchRunner(MicrobenchConfig(dry_run=dry_run))
-    workload = WorkloadRunner(WorkloadRunConfig(dry_run=dry_run), metrics_parser=metrics.parse)
+def build_tools(config, run_context: RunContext, dry_run: bool) -> ToolSuite:
+    metrics = MetricsCollector(config.metrics, run_context=run_context)
+    microbench = MicrobenchRunner(
+        MicrobenchConfig.from_settings(config.microbench, dry_run=dry_run),
+        run_context=run_context,
+    )
+    workload = WorkloadRunner(
+        WorkloadRunConfig(dry_run=dry_run),
+        metrics_parser=metrics.parse,
+        run_context=run_context,
+    )
     sla = SLAEnforcer(max_iteration_time=config.sla_max_iteration_time)
-    compiler = ConfigCompiler(config.parameter_space)
+    compiler = ConfigCompiler(config.parameter_space, safety=config.safety)
     nccl = NCCLInterface(compiler)
-    nccltest = NcclTestRunner(NcclTestConfig(dry_run=dry_run))
-    training = TrainingJobRunner(TrainingJobConfig(dry_run=dry_run))
+    nccltest = NcclTestRunner(NcclTestConfig(dry_run=dry_run), run_context=run_context)
+    training = TrainingJobRunner(TrainingJobConfig(dry_run=dry_run), run_context=run_context)
     ext_tuner = ExtTunerBridge()
     autoccl = ext_tuner
     ext_net = ExtNetBridge()
-    numeric_search = NumericSearchTool()
+    numeric_search = NumericSearchTool(
+        NumericSearchConfig(
+            max_candidates=config.numeric_search.max_candidates,
+            concurrency=config.numeric_search.concurrency,
+        ),
+        rng_seed=config.seed,
+    )
     return ToolSuite(
         microbench=microbench,
         workload=workload,
@@ -58,6 +72,7 @@ def build_tools(config, dry_run: bool) -> ToolSuite:
         ext_tuner=ext_tuner,
         ext_net=ext_net,
         numeric_search=numeric_search,
+        run_context=run_context,
     )
 
 
@@ -72,21 +87,32 @@ def main() -> None:
     )
     parser.add_argument("--model", default="", help="LLM model name.")
     parser.add_argument("--dry-run", action="store_true", help="Use simulated microbench/workload runs.")
+    parser.add_argument("--artifacts-root", default=None, help="Root directory for run artifacts.")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed override.")
     args = parser.parse_args()
 
     agent_config = load_agent_config(args.config) if args.config else default_agent_config()
+    if args.artifacts_root:
+        agent_config.artifacts_root = args.artifacts_root
+    if args.seed is not None:
+        agent_config.seed = args.seed
     workload = load_workload_spec(args.workload) if args.workload else WorkloadSpec(name="demo", command=[])
 
-    tools = build_tools(agent_config, dry_run=args.dry_run)
-    memory = MemoryStore(agent_config.memory_path)
-    rag = RagStore()
+    run_context = create_run_context(agent_config.artifacts_root, dry_run=args.dry_run, seed=agent_config.seed)
+    config_snapshot_path = artifact_path(run_context, "config_snapshot.json")
+    write_json(config_snapshot_path, config_to_dict(agent_config))
+    run_context.config_snapshot_path = config_snapshot_path
+    write_json(artifact_path(run_context, "run_context.json"), run_context.__dict__)
+    tools = build_tools(agent_config, run_context=run_context, dry_run=args.dry_run)
+    memory = MemoryStore(agent_config.memory, run_context=run_context)
+    rag = RagStore(agent_config.rag)
     llm = create_llm_client(args.provider, args.model) if args.provider else create_llm_client("none", "")
 
-    agent = CCLAgent(config=agent_config, tools=tools, memory=memory, rag=rag, llm=llm)
+    agent = CCLAgent(config=agent_config, tools=tools, memory=memory, rag=rag, llm=llm, run_context=run_context)
     state = agent.tune(workload)
 
     if state.best_record:
-        logger.info("Best iteration time: %.4f", state.best_record.metrics.iteration_time)
+        logger.info("Best iteration time (ms): %.3f", state.best_record.metrics.iteration_time_ms)
     else:
         logger.info("No tuning records produced.")
 

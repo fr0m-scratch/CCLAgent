@@ -1,0 +1,14 @@
+{
+  "evidence": {
+    "source": "heuristic"
+  },
+  "expected_effect": {
+    "iteration_time_ms": "decrease"
+  },
+  "id": "3029606b-a05d-4fd5-a168-cb69f54f7e0c",
+  "patch": {
+    "NCCL_ALGO": "RING"
+  },
+  "risk": "low",
+  "summary": "single-parameter mutation"
+}

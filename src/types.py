@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+
+
+METRICS_SCHEMA_VERSION = "1.0"
 
 
 @dataclass
@@ -126,20 +129,45 @@ class NCCLConfig:
 
 
 @dataclass
+class MicrobenchSignal:
+    name: str
+    value: float | int | str
+    unit: Optional[str] = None
+    confidence: float = 0.5
+    source: str = "unknown"
+
+
+@dataclass
+class ImportantParam:
+    param: str
+    importance: float
+    reason: str = ""
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class MicrobenchResult:
-    important_params: List[str] = field(default_factory=list)
-    signals: Dict[str, float] = field(default_factory=dict)
+    important_params: List[ImportantParam] = field(default_factory=list)
+    signals: List[MicrobenchSignal] = field(default_factory=list)
+    raw_path: str = ""
+    command: List[str] = field(default_factory=list)
+    runtime_sec: float = 0.0
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class Metrics:
-    iteration_time: float
-    comm_time: Optional[float] = None
-    bandwidth: Optional[float] = None
-    errors: int = 0
-    timestamp: Optional[float] = None
-    extras: Dict[str, Any] = field(default_factory=dict)
+    iteration_time_ms: float
+    throughput: Optional[float] = None
+    comm_time_ms: Optional[float] = None
+    busbw_gbps: Optional[float] = None
+    algbw_gbps: Optional[float] = None
+    loss: Optional[float] = None
+    error_budget: Optional[float] = None
+    success: bool = True
+    failure_reason: Optional[str] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+    schema_version: str = METRICS_SCHEMA_VERSION
 
 
 @dataclass
@@ -152,15 +180,89 @@ class WorkloadSpec:
     env: Dict[str, str] = field(default_factory=dict)
     kind: str = "workload"
     metadata: Dict[str, Any] = field(default_factory=dict)
+    launcher: str = "local"  # local, torchrun, slurm, mpirun
+    launcher_args: Dict[str, Any] = field(default_factory=dict)
+    gpus_per_node: Optional[int] = None
+    eval_mode: str = "full"  # full, short
+    eval_steps: Optional[int] = None
+    eval_timeout_sec: Optional[int] = None
 
 
 @dataclass
 class ContextSignature:
     workload: str
+    workload_kind: str
     topology: str
     scale: str
     nodes: int
+    model: Optional[str] = None
+    framework: Optional[str] = None
+    gpus_per_node: Optional[int] = None
+    gpu_type: Optional[str] = None
+    network: Optional[str] = None
+    nic_count: Optional[int] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RunContext:
+    run_id: str
+    started_at_iso: str
+    artifacts_dir: str
+    dry_run: bool
+    seed: int
+    git_commit: Optional[str]
+    host_info: Dict[str, Any]
+    config_snapshot_path: Optional[str] = None
+    schema_version: str = "1.0"
+
+    @property
+    def started_at(self) -> str:
+        return self.started_at_iso
+
+@dataclass
+class RAGChunk:
+    doc_id: str
+    chunk_id: str
+    text: str
+    score: float = 0.0
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+
+@dataclass
+class Subspace:
+    name: str
+    fixed: Dict[str, Any] = field(default_factory=dict)
+    free: List[str] = field(default_factory=list)
+
+
+@dataclass
+class InitialConfigPlan:
+    baseline_config: NCCLConfig
+    constraints: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    important_params: List[ImportantParam] = field(default_factory=list)
+    candidate_subspaces: List[Subspace] = field(default_factory=list)
+    recommended_search_params: List[str] = field(default_factory=list)
+    notes: str = ""
+
+
+@dataclass
+class Hypothesis:
+    id: str
+    summary: str
+    patch: Dict[str, Any]
+    expected_effect: Dict[str, str] = field(default_factory=dict)
+    risk: str = "low"
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CompiledConfig:
+    config: NCCLConfig
+    env: Dict[str, str]
+    warnings: List[str] = field(default_factory=list)
+    risk_score: float = 0.0
 
 
 @dataclass
@@ -168,19 +270,51 @@ class TuningAction:
     kind: str
     config: NCCLConfig
     rationale: str
+    hypothesis: Optional[Hypothesis] = None
+    compiled: Optional[CompiledConfig] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class HypothesisAction(TuningAction):
+    pass
+
+
+@dataclass
+class NumericSearchAction(TuningAction):
+    search: Optional['SearchResult'] = None
+
+
+@dataclass
+class StopAction:
+    kind: str
+    reason: str
+
+
+@dataclass
+class RollbackAction:
+    kind: str
+    reason: str
+    config: NCCLConfig
 
 
 @dataclass
 class TuningRecord:
+    step: int
     action: TuningAction
     metrics: Metrics
+    decision: Dict[str, Any] = field(default_factory=dict)
+    rule_ids: List[str] = field(default_factory=list)
+    microbench_snapshot: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class SearchCandidate:
     config: NCCLConfig
-    predicted_time: float
+    predicted_time_ms: float
     rationale: str
+    evaluation_mode: str = "predict_only"
+    uncertainty: float = 0.0
 
 
 @dataclass
@@ -195,15 +329,99 @@ class TuningBudget:
     min_improvement: float = 0.01
     patience: int = 3
     hypothesis_every: int = 2
+    plateau_eps: float = 0.003
+    plateau_window: int = 5
+    target_gain: Optional[float] = None
+    stable_steps: int = 2
+
+
+@dataclass
+class MicrobenchSettings:
+    mode: str = "dry"  # dry, cclinsight, nccltests
+    command_template: List[str] = field(default_factory=list)
+    parse_schema: str = "cclinsight_v1"
+    timeout_sec: int = 900
+    env: Dict[str, str] = field(default_factory=dict)
+    collect_topology: bool = False
+    repetitions: int = 1
+    allow_fallback: bool = True
+
+
+@dataclass
+class RagConfig:
+    mode: str = "jaccard"  # jaccard, embeddings
+    top_k: int = 5
+    rebuild_index: bool = False
+    index_path: str = "rag_index"
+    docs_paths: List[str] = field(default_factory=list)
+    allow_fallback: bool = True
+
+
+@dataclass
+class MemoryConfig:
+    path: str = "memory/agent_memory.json"
+    top_k: int = 5
+    half_life_days: float = 30.0
+    allow_negative_rules: bool = True
+
+
+@dataclass
+class MetricsConfig:
+    parse_mode: str = "json_stdout_v1"
+    allow_missing_metrics: bool = False
+
+
+@dataclass
+class NumericSearchSettings:
+    mode: str = "predict_only"  # predict_only, real_eval
+    max_candidates: int = 8
+    concurrency: int = 4
+    short_eval_steps: int = 50
+    short_eval_timeout_sec: int = 300
+    allow_fallback: bool = True
+
+
+@dataclass
+class SafetyConfig:
+    max_channels_safe: int = 32
+    min_buffsize_safe: int = 1 << 20
+    max_risk_score: float = 0.7
+    safe_envelope: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    known_bad_combos_path: Optional[str] = None
+    risk_threshold: float = 0.7
+    allow_fallback: bool = True
+
+
+@dataclass
+class ExecutionConfig:
+    mode: str = "restart_per_step"  # restart_per_step, in_job_ext_tuner
+    allow_fallback: bool = True
+
+
+@dataclass
+class SurrogateConfig:
+    model_type: str = "rf"
+    refit_every_steps: int = 5
+    retrain_every: int = 5
+    min_records: int = 8
+    dataset_path: str = "memory/datasets"
+    model_dir: str = "memory/models"
 
 
 @dataclass
 class AgentConfig:
     parameter_space: ParameterSpace
     budget: TuningBudget
-    memory_path: str
-    rag_docs_path: Optional[str] = None
-    rag_top_k: int = 5
+    memory: MemoryConfig
+    rag: RagConfig
+    microbench: MicrobenchSettings
+    metrics: MetricsConfig
+    numeric_search: NumericSearchSettings
+    safety: SafetyConfig
+    execution: ExecutionConfig
+    surrogate: SurrogateConfig
+    artifacts_root: str = "artifacts"
+    seed: int = 7
     sla_max_iteration_time: Optional[float] = None
 
 
@@ -221,3 +439,4 @@ class ToolRegistry:
     ext_tuner: Any | None = None
     ext_net: Any | None = None
     numeric_search: Any | None = None
+    run_context: Optional[RunContext] = None

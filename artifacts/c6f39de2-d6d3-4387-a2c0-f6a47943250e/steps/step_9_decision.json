@@ -1,0 +1,7 @@
+{
+  "action": "stop",
+  "last_success": true,
+  "plateau": true,
+  "sla_rollback": false,
+  "step": 9
+}

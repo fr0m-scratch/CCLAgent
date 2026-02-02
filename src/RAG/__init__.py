@@ -1,3 +1,3 @@
-from .store import Document, RagStore
+from .store import RagStore
 
-__all__ = ["Document", "RagStore"]
+__all__ = ["RagStore"]

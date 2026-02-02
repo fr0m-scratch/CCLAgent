@@ -1,0 +1,16 @@
+{
+  "algbw_gbps": 126.0,
+  "busbw_gbps": 113.4,
+  "comm_time_ms": 384.8,
+  "error_budget": null,
+  "failure_reason": null,
+  "iteration_time_ms": 962.0000000000001,
+  "loss": null,
+  "raw": {
+    "seed": 3282626,
+    "simulated": true
+  },
+  "schema_version": "1.0",
+  "success": true,
+  "throughput": null
+}

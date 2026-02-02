@@ -1,0 +1,25 @@
+{
+  "action": "hypothesis",
+  "compiled": {
+    "risk_score": 0.0,
+    "warnings": []
+  },
+  "hypothesis": {
+    "evidence": {
+      "source": "heuristic"
+    },
+    "expected_effect": {
+      "iteration_time_ms": "decrease"
+    },
+    "id": "bd87dc06-40cb-4f7c-96bd-511042ab058b",
+    "patch": {
+      "NCCL_ALGO": "RING"
+    },
+    "risk": "low",
+    "summary": "single-parameter mutation"
+  },
+  "last_success": true,
+  "plateau": false,
+  "sla_rollback": false,
+  "step": 4
+}

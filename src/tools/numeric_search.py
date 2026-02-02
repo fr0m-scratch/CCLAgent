@@ -43,7 +43,7 @@ class NumericSearchTool:
             )
 
         results = await asyncio.gather(*tasks)
-        results.sort(key=lambda item: item.predicted_time)
+        results.sort(key=lambda item: item.predicted_time_ms)
         best = results[0]
         return SearchResult(best=best, candidates=results)
 
@@ -74,7 +74,7 @@ class NumericSearchTool:
         async with semaphore:
             await asyncio.sleep(0)
             predicted = scorer(candidate)
-            return SearchCandidate(config=candidate, predicted_time=predicted, rationale=rationale)
+            return SearchCandidate(config=candidate, predicted_time_ms=predicted, rationale=rationale)
 
     def _mutate_candidate(
         self,

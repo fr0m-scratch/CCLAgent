@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from ..types import RunContext
 from .autoccl import AutoCCLBridge
 from .config_compiler import ConfigCompiler
 from .ext_net import ExtNetBridge
@@ -31,3 +32,4 @@ class ToolSuite:
     ext_tuner: Optional[ExtTunerBridge] = None
     ext_net: Optional[ExtNetBridge] = None
     numeric_search: Optional[NumericSearchTool] = None
+    run_context: Optional[RunContext] = None

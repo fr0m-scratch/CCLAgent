@@ -3,7 +3,21 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any, Dict, List
 
-from .types import AgentConfig, ParameterSpace, ParameterSpec, TuningBudget, WorkloadSpec
+from .types import (
+    AgentConfig,
+    ExecutionConfig,
+    MemoryConfig,
+    MetricsConfig,
+    MicrobenchSettings,
+    NumericSearchSettings,
+    ParameterSpace,
+    ParameterSpec,
+    RagConfig,
+    SafetyConfig,
+    SurrogateConfig,
+    TuningBudget,
+    WorkloadSpec,
+)
 from .utils import read_json
 
 
@@ -58,20 +72,95 @@ DEFAULT_PARAMETER_SPECS: List[ParameterSpec] = [
         default=8,
         description="Maximum channels for collectives.",
     ),
+    ParameterSpec(
+        name="NCCL_P2P_LEVEL",
+        kind="enum",
+        choices=["NVL", "PXB", "SYS"],
+        default="SYS",
+        description="P2P level selection.",
+    ),
+    ParameterSpec(
+        name="NCCL_NET_GDR_LEVEL",
+        kind="int",
+        min_value=0,
+        max_value=2,
+        step=1,
+        default=1,
+        description="GPUDirect RDMA level.",
+    ),
+    ParameterSpec(
+        name="NCCL_SOCKET_NTHREADS",
+        kind="int",
+        min_value=1,
+        max_value=8,
+        step=1,
+        default=2,
+        description="Socket threads.",
+    ),
+    ParameterSpec(
+        name="NCCL_NSOCKS_PERTHREAD",
+        kind="int",
+        min_value=1,
+        max_value=8,
+        step=1,
+        default=2,
+        description="Sockets per thread.",
+    ),
+    ParameterSpec(
+        name="NCCL_IB_QPS_PER_CONNECTION",
+        kind="int",
+        min_value=1,
+        max_value=8,
+        step=1,
+        default=1,
+        description="QPs per IB connection.",
+    ),
+    ParameterSpec(
+        name="NCCL_SHM_DISABLE",
+        kind="bool",
+        default=False,
+        description="Disable shared memory transport.",
+    ),
 ]
+
+
+def _default_rag_paths() -> List[str]:
+    return ["doc/Design", "doc/Knowledge", "README", "workload"]
 
 
 def default_agent_config(memory_path: str = "memory/agent_memory.json") -> AgentConfig:
     parameter_space = ParameterSpace.from_list(DEFAULT_PARAMETER_SPECS)
     budget = TuningBudget()
+    rag = RagConfig(docs_paths=_default_rag_paths())
+    microbench = MicrobenchSettings()
+    metrics = MetricsConfig()
+    numeric_search = NumericSearchSettings()
+    safety = SafetyConfig()
+    execution = ExecutionConfig()
+    surrogate = SurrogateConfig()
+    memory = MemoryConfig(path=memory_path)
     return AgentConfig(
         parameter_space=parameter_space,
         budget=budget,
-        memory_path=memory_path,
-        rag_docs_path="doc/Design",
-        rag_top_k=5,
+        memory=memory,
+        rag=rag,
+        microbench=microbench,
+        metrics=metrics,
+        numeric_search=numeric_search,
+        safety=safety,
+        execution=execution,
+        surrogate=surrogate,
+        artifacts_root="artifacts",
+        seed=7,
         sla_max_iteration_time=None,
     )
+
+
+def _merge_dataclass(default_obj, payload: Dict[str, Any]):
+    for key, value in payload.items():
+        if hasattr(default_obj, key):
+            setattr(default_obj, key, value)
+    return default_obj
 
 
 def load_agent_config(path: str) -> AgentConfig:
@@ -88,12 +177,39 @@ def load_agent_config(path: str) -> AgentConfig:
 
     parameter_space = ParameterSpace.from_list(param_specs)
 
+    rag = _merge_dataclass(RagConfig(docs_paths=_default_rag_paths()), payload.get("rag", {}))
+    if not rag.docs_paths:
+        rag.docs_paths = _default_rag_paths()
+    if payload.get("rag_docs_path") and rag.docs_paths == _default_rag_paths():
+        rag.docs_paths = [payload["rag_docs_path"]]
+    if payload.get("rag_top_k"):
+        rag.top_k = payload.get("rag_top_k")
+
+    microbench = _merge_dataclass(MicrobenchSettings(), payload.get("microbench", {}))
+    metrics = _merge_dataclass(MetricsConfig(), payload.get("metrics", {}))
+    numeric_search = _merge_dataclass(NumericSearchSettings(), payload.get("numeric_search", {}))
+    safety = _merge_dataclass(SafetyConfig(), payload.get("safety", {}))
+    execution = _merge_dataclass(ExecutionConfig(), payload.get("execution", {}))
+    surrogate = _merge_dataclass(SurrogateConfig(), payload.get("surrogate", {}))
+
+    memory_payload = payload.get("memory", {})
+    memory = _merge_dataclass(MemoryConfig(path="memory/agent_memory.json"), memory_payload)
+    if payload.get("memory_path"):
+        memory.path = payload.get("memory_path")
+
     return AgentConfig(
         parameter_space=parameter_space,
         budget=budget,
-        memory_path=payload.get("memory_path", "memory/agent_memory.json"),
-        rag_docs_path=payload.get("rag_docs_path"),
-        rag_top_k=payload.get("rag_top_k", 5),
+        memory=memory,
+        rag=rag,
+        microbench=microbench,
+        metrics=metrics,
+        numeric_search=numeric_search,
+        safety=safety,
+        execution=execution,
+        surrogate=surrogate,
+        artifacts_root=payload.get("artifacts_root", "artifacts"),
+        seed=payload.get("seed", 7),
         sla_max_iteration_time=payload.get("sla_max_iteration_time"),
     )
 
@@ -109,6 +225,12 @@ def load_workload_spec(path: str) -> WorkloadSpec:
         env=payload.get("env", {}),
         kind=payload.get("kind", "workload"),
         metadata=payload.get("metadata", {}),
+        launcher=payload.get("launcher", "local"),
+        launcher_args=payload.get("launcher_args", {}),
+        gpus_per_node=payload.get("gpus_per_node"),
+        eval_mode=payload.get("eval_mode", "full"),
+        eval_steps=payload.get("eval_steps"),
+        eval_timeout_sec=payload.get("eval_timeout_sec"),
     )
 
 

@@ -1,0 +1,47 @@
+{
+  "action": {
+    "config": {
+      "NCCL_ALGO": "RING",
+      "NCCL_BUFFSIZE": 5242880,
+      "NCCL_IB_QPS_PER_CONNECTION": 1,
+      "NCCL_MAX_NCHANNELS": 8,
+      "NCCL_MIN_NCHANNELS": 4,
+      "NCCL_NET_GDR_LEVEL": 1,
+      "NCCL_NSOCKS_PERTHREAD": 2,
+      "NCCL_NTHREADS": 256,
+      "NCCL_P2P_LEVEL": "SYS",
+      "NCCL_PROTO": "LL128",
+      "NCCL_SHM_DISABLE": false,
+      "NCCL_SOCKET_NTHREADS": 2
+    },
+    "delta": {
+      "NCCL_ALGO": {
+        "from": "TREE",
+        "to": "RING"
+      }
+    },
+    "kind": "apply",
+    "rationale": "apply"
+  },
+  "metrics": {
+    "algbw_gbps": 108.0,
+    "busbw_gbps": 97.2,
+    "comm_time_ms": 418.40000000000003,
+    "error_budget": null,
+    "failure_reason": null,
+    "iteration_time_ms": 1046.0,
+    "loss": null,
+    "raw": {
+      "seed": 10316158,
+      "simulated": true,
+      "sla_ok": true,
+      "sla_rollback": false,
+      "sla_severity": "soft",
+      "sla_violations": []
+    },
+    "schema_version": "1.0",
+    "success": true,
+    "throughput": null
+  },
+  "step": 6
+}

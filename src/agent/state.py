@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import random
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from ..types import NCCLConfig, ParameterSpace, TuningBudget, TuningRecord
+from ..types import Metrics, NCCLConfig, ParameterSpace, TuningBudget, TuningRecord
 
 
 @dataclass
@@ -14,16 +14,20 @@ class TuningState:
     best_record: Optional[TuningRecord] = None
     history: List[TuningRecord] = field(default_factory=list)
     plateau_count: int = 0
+    last_known_good: Optional[NCCLConfig] = None
+    search_state: Any = None
 
     def record(self, record: TuningRecord) -> None:
         self.history.append(record)
+        if record.metrics.success:
+            self.last_known_good = record.action.config
         if self.best_record is None:
             self.best_record = record
             return
-        if record.metrics.iteration_time < self.best_record.metrics.iteration_time:
+        if record.metrics.iteration_time_ms < self.best_record.metrics.iteration_time_ms:
             improvement = (
-                (self.best_record.metrics.iteration_time - record.metrics.iteration_time)
-                / max(1e-9, self.best_record.metrics.iteration_time)
+                (self.best_record.metrics.iteration_time_ms - record.metrics.iteration_time_ms)
+                / max(1e-9, self.best_record.metrics.iteration_time_ms)
             )
             if improvement < self.budget.min_improvement:
                 self.plateau_count += 1
@@ -37,14 +41,18 @@ class TuningState:
     def should_stop(self) -> bool:
         return self.plateau_count >= self.budget.patience
 
+    def recent_best_window(self) -> List[float]:
+        window = self.history[-self.budget.plateau_window :]
+        return [rec.metrics.iteration_time_ms for rec in window if rec.metrics.success]
+
 
 class HistorySurrogate:
     def __init__(self) -> None:
         self._records: Dict[str, float] = {}
 
-    def update(self, config: NCCLConfig, iteration_time: float) -> None:
+    def update(self, config: NCCLConfig, iteration_time_ms: float) -> None:
         key = self._key(config)
-        self._records[key] = iteration_time
+        self._records[key] = iteration_time_ms
 
     def predict(self, config: NCCLConfig, default: float = 1.0) -> float:
         return self._records.get(self._key(config), default)
@@ -67,9 +75,9 @@ class SurrogateModel:
         self.distance_eps = max(1e-12, distance_eps)
         self._records: List[Tuple[List[float], float, NCCLConfig]] = []
 
-    def update(self, config: NCCLConfig, iteration_time: float) -> None:
+    def update(self, config: NCCLConfig, iteration_time_ms: float) -> None:
         x = self._encode(config)
-        self._records.append((x, iteration_time, config))
+        self._records.append((x, iteration_time_ms, config))
 
     def predict(self, config: NCCLConfig, default: float = 1.0) -> float:
         if not self._records:

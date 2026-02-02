@@ -1,0 +1,38 @@
+[
+  {
+    "config": {
+      "NCCL_ALGO": "TREE",
+      "NCCL_BUFFSIZE": 5242880,
+      "NCCL_IB_QPS_PER_CONNECTION": 1,
+      "NCCL_MAX_NCHANNELS": 8,
+      "NCCL_MIN_NCHANNELS": 4,
+      "NCCL_NET_GDR_LEVEL": 1,
+      "NCCL_NSOCKS_PERTHREAD": 2,
+      "NCCL_NTHREADS": 128,
+      "NCCL_P2P_LEVEL": "SYS",
+      "NCCL_PROTO": "LL128",
+      "NCCL_SHM_DISABLE": false,
+      "NCCL_SOCKET_NTHREADS": 2
+    },
+    "predicted_time_ms": 1081.1710602898672,
+    "uncertainty": 31.62282245283563
+  },
+  {
+    "config": {
+      "NCCL_ALGO": "TREE",
+      "NCCL_BUFFSIZE": 5242880,
+      "NCCL_IB_QPS_PER_CONNECTION": 1,
+      "NCCL_MAX_NCHANNELS": 8,
+      "NCCL_MIN_NCHANNELS": 4,
+      "NCCL_NET_GDR_LEVEL": 1,
+      "NCCL_NSOCKS_PERTHREAD": 2,
+      "NCCL_NTHREADS": 256,
+      "NCCL_P2P_LEVEL": "SYS",
+      "NCCL_PROTO": "LL128",
+      "NCCL_SHM_DISABLE": false,
+      "NCCL_SOCKET_NTHREADS": 2
+    },
+    "predicted_time_ms": 1080.9668411276195,
+    "uncertainty": 31.641745412431025
+  }
+]
