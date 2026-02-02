@@ -1,0 +1,24 @@
+# Local secrets
+.env.local
+.env.*
+
+# Artifacts and runtime outputs
+artifacts/
+memory/
+rag_index/
+
+# Python cache / tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Model/data exports
+*.pkl
+*.jsonl
+*.npy
+*.npz
+
+# Logs
+*.log

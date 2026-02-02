@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -78,6 +79,8 @@ class OpenAICompatibleClient(LLMClient):
         }
         payload.update(kwargs)
 
+        _trace_llm_event("request", {"model": self.model, "payload": payload, "base_url": self.base_url})
+
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -86,6 +89,7 @@ class OpenAICompatibleClient(LLMClient):
 
         response = _post_json(url, payload, headers=headers, timeout_s=self.timeout_s)
         content = _extract_openai_content(response)
+        _trace_llm_event("response", {"model": self.model, "content": content, "raw": response})
         return LLMResponse(content=content, model=self.model, raw=response)
 
 
@@ -105,3 +109,26 @@ def _extract_openai_content(response: Any) -> str:
         return response["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         return ""
+
+
+def _trace_llm_event(kind: str, payload: Dict[str, Any]) -> None:
+    if os.getenv("CCL_LLM_TRACE_STDOUT", "1").lower() in ("1", "true", "yes"):
+        try:
+            print(f"[LLM_TRACE] {json.dumps({'kind': kind, 'payload': payload})}")
+        except Exception:
+            pass
+    trace_dir = os.getenv("CCL_LLM_TRACE_DIR")
+    if not trace_dir:
+        return
+    try:
+        os.makedirs(trace_dir, exist_ok=True)
+        path = os.path.join(trace_dir, "llm_trace.jsonl")
+        envelope = {
+            "ts": time.time(),
+            "kind": kind,
+            "payload": payload,
+        }
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(envelope) + "\n")
+    except Exception:
+        return

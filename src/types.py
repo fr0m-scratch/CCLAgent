@@ -52,9 +52,22 @@ class ParameterSpec:
         if self.kind in ("int", "float"):
             if self.step is None:
                 return []
+            try:
+                current = self.normalize(value)
+            except (TypeError, ValueError):
+                fallback = self.default
+                if fallback is None:
+                    fallback = self.min_value if self.min_value is not None else 0
+                try:
+                    current = self.normalize(fallback)
+                except (TypeError, ValueError):
+                    return []
             neighbors = []
             for delta in (-self.step, self.step):
-                candidate = self.normalize(value + delta)
+                try:
+                    candidate = self.normalize(current + delta)
+                except (TypeError, ValueError):
+                    continue
                 if self.is_valid(candidate):
                     neighbors.append(candidate)
                 if len(neighbors) >= max_neighbors:

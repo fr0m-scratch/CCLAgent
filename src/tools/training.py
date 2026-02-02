@@ -5,7 +5,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..types import Metrics, NCCLConfig, RunContext, WorkloadSpec
 from .launchers import build_mpi_command, build_slurm_command, build_torchrun_command
@@ -136,19 +136,85 @@ class TrainingJobRunner:
         seed = self._seed_from_config(config)
         base = 1.2 + (seed % 100) / 400.0
         improvement = (step + 1) * 0.015
-        iter_time = max(0.2, base - improvement)
+        effects = self._simulate_effects(config)
+        iter_time = max(0.2, base - improvement + effects["iter_adjust"])
         comm_time = iter_time * 0.45
-        bandwidth = 90.0 + (seed % 60)
+        bandwidth = (90.0 + (seed % 60)) * (1.0 + effects["bw_adjust"])
+        bandwidth = max(1.0, bandwidth)
         return Metrics(
             iteration_time_ms=iter_time * 1000.0,
             comm_time_ms=comm_time * 1000.0,
             algbw_gbps=bandwidth,
             busbw_gbps=bandwidth * 0.88,
             success=True,
-            raw={"simulated": True, "seed": seed},
+            raw={"simulated": True, "seed": seed, "simulated_effects": effects["details"]},
         )
 
     def _seed_from_config(self, config: NCCLConfig) -> int:
         payload = "|".join(f"{k}={v}" for k, v in sorted(config.params.items()))
         digest = hashlib.md5(payload.encode("utf-8")).hexdigest()
         return int(digest[:6], 16)
+
+    def _simulate_effects(self, config: NCCLConfig) -> Dict[str, Any]:
+        params = config.params
+        iter_adjust = 0.0
+        bw_adjust = 0.0
+        details: Dict[str, Any] = {}
+
+        algo = params.get("NCCL_ALGO")
+        if algo == "TREE":
+            iter_adjust -= 0.02
+            bw_adjust += 0.04
+        elif algo == "COLLNET":
+            iter_adjust -= 0.01
+            bw_adjust += 0.02
+
+        proto = params.get("NCCL_PROTO")
+        if proto == "LL":
+            iter_adjust -= 0.008
+            bw_adjust += 0.02
+        elif proto == "LL128":
+            iter_adjust -= 0.004
+            bw_adjust += 0.01
+
+        nthreads = self._safe_int(params.get("NCCL_NTHREADS"))
+        if nthreads:
+            if 256 <= nthreads <= 384:
+                iter_adjust -= 0.004
+                bw_adjust += 0.01
+            elif nthreads > 512:
+                iter_adjust += 0.008
+
+        buffsize = self._safe_int(params.get("NCCL_BUFFSIZE"))
+        if buffsize:
+            if buffsize < (1 << 20):
+                iter_adjust += 0.03
+                bw_adjust -= 0.04
+            elif buffsize > (1 << 25):
+                iter_adjust += 0.008
+            else:
+                iter_adjust -= 0.004
+
+        max_channels = self._safe_int(params.get("NCCL_MAX_NCHANNELS"))
+        if max_channels:
+            if 4 <= max_channels <= 16:
+                iter_adjust -= 0.004
+                bw_adjust += 0.01
+            elif max_channels > 32:
+                iter_adjust += 0.008
+                bw_adjust -= 0.01
+
+        details["algo"] = algo
+        details["proto"] = proto
+        details["nthreads"] = nthreads
+        details["buffsize"] = buffsize
+        details["max_channels"] = max_channels
+        details["iter_adjust"] = iter_adjust
+        details["bw_adjust"] = bw_adjust
+        return {"iter_adjust": iter_adjust, "bw_adjust": bw_adjust, "details": details}
+
+    def _safe_int(self, value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
