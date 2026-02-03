@@ -12,6 +12,7 @@ from .sla import SLAEnforcer, SLAResult
 from .suite import ToolSuite
 from .training import TrainingJobConfig, TrainingJobRunner
 from .workload import WorkloadRunConfig, WorkloadRunner
+from .instrumented import InstrumentedToolSuite
 
 __all__ = [
     "AutoCCLBridge",
@@ -42,4 +43,5 @@ __all__ = [
     "TrainingJobRunner",
     "WorkloadRunConfig",
     "WorkloadRunner",
+    "InstrumentedToolSuite",
 ]

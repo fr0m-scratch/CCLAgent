@@ -5,7 +5,7 @@ import os
 
 from .agent import CCLAgent
 from .config import config_to_dict, default_agent_config, load_agent_config, load_workload_spec
-from .llm import create_llm_client
+from .llm import create_llm_client, TracedLLMClient
 from .memory import MemoryStore
 from .RAG import RagStore
 from .tools import (
@@ -26,9 +26,11 @@ from .tools import (
     TrainingJobRunner,
     WorkloadRunConfig,
     WorkloadRunner,
+    InstrumentedToolSuite,
 )
 from .types import RunContext, WorkloadSpec
 from .utils import artifact_path, create_run_context, load_env_file, setup_logger, write_json
+from .trace import TraceEmitterWriter, TraceWriter
 
 
 logger = setup_logger("cclagent.cli")
@@ -125,6 +127,8 @@ def main() -> None:
     run_context.config_snapshot_path = config_snapshot_path
     write_json(artifact_path(run_context, "run_context.json"), run_context.__dict__)
     simulate_workload = args.simulate_workload or args.simulate_execution
+    trace_writer = TraceWriter(run_context.run_id, run_context.artifacts_dir)
+    trace_emitter = TraceEmitterWriter(trace_writer)
     tools = build_tools(
         agent_config,
         run_context=run_context,
@@ -134,9 +138,21 @@ def main() -> None:
     memory = MemoryStore(agent_config.memory, run_context=run_context)
     rag = RagStore(agent_config.rag)
     llm = create_llm_client(args.provider, args.model) if args.provider else create_llm_client("none", "")
-
-    agent = CCLAgent(config=agent_config, tools=tools, memory=memory, rag=rag, llm=llm, run_context=run_context)
-    state = agent.tune(workload)
+    llm = TracedLLMClient(llm, trace_emitter, run_context.artifacts_dir, run_context.run_id)
+    tools = InstrumentedToolSuite(tools, trace_emitter, run_context.run_id)
+    try:
+        agent = CCLAgent(
+            config=agent_config,
+            tools=tools,
+            memory=memory,
+            rag=rag,
+            llm=llm,
+            run_context=run_context,
+            trace=trace_emitter,
+        )
+        state = agent.tune(workload)
+    finally:
+        trace_writer.close()
 
     if state.best_record:
         logger.info("Best iteration time (ms): %.3f", state.best_record.metrics.iteration_time_ms)

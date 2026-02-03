@@ -23,28 +23,48 @@ class HypothesisGenerator:
         base_config: NCCLConfig,
         last_metrics: Any,
     ) -> Hypothesis:
-        rules = self.memory.retrieve_rules(context, top_k=1)
-        if rules:
-            rule = rules[0]
-            return Hypothesis(
-                id=rule.id,
-                summary="apply memory rule",
-                patch=rule.config_patch,
-                expected_effect={"iteration_time_ms": "decrease"},
-                risk="low",
-                evidence={"rule_id": rule.id, "improvement": rule.improvement},
-            )
+        portfolio = self.propose_portfolio(plan, context, base_config, last_metrics, max_hypotheses=1)
+        return portfolio[0]
 
-        important = [ip.param for ip in plan.important_params] or plan.recommended_search_params
-        patch = self._mutate_single(base_config, important)
-        return Hypothesis(
-            id=str(uuid.uuid4()),
-            summary="single-parameter mutation",
-            patch=patch,
-            expected_effect={"iteration_time_ms": "decrease"},
-            risk="low",
-            evidence={"source": "heuristic"},
-        )
+    def propose_portfolio(
+        self,
+        plan: InitialConfigPlan,
+        context,
+        base_config: NCCLConfig,
+        last_metrics: Any,
+        max_hypotheses: int = 3,
+    ) -> List[Hypothesis]:
+        hypotheses: List[Hypothesis] = []
+        rules = self.memory.retrieve_rules(context, top_k=max_hypotheses)
+        for rule in rules:
+            hypotheses.append(
+                Hypothesis(
+                    id=rule.id,
+                    summary="apply memory rule",
+                    patch=rule.config_patch,
+                    mechanism="memory_rule",
+                    expected_effect={"iteration_time_ms": "decrease"},
+                    risk="low",
+                    evidence={"rule_id": rule.id, "improvement": rule.improvement},
+                    test_plan={"metric": "iteration_time_ms", "direction": "decrease"},
+                )
+            )
+        if len(hypotheses) < max_hypotheses:
+            important = [ip.param for ip in plan.important_params] or plan.recommended_search_params
+            patch = self._mutate_single(base_config, important)
+            hypotheses.append(
+                Hypothesis(
+                    id=str(uuid.uuid4()),
+                    summary="single-parameter mutation",
+                    patch=patch,
+                    mechanism="mutation",
+                    expected_effect={"iteration_time_ms": "decrease"},
+                    risk="low",
+                    evidence={"source": "heuristic"},
+                    test_plan={"metric": "iteration_time_ms", "direction": "decrease"},
+                )
+            )
+        return hypotheses[:max_hypotheses]
 
     def _mutate_single(self, base_config: NCCLConfig, focus: List[str]) -> Dict[str, Any]:
         if not focus:

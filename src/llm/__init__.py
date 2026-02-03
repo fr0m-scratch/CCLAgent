@@ -7,6 +7,7 @@ from .claude import ClaudeClient
 from .fireworks import FireworksClient
 from .gemini import GeminiClient
 from .openai import OpenAIClient
+from .traced_client import TracedLLMClient
 
 
 def create_llm_client(provider: str, model: str, **kwargs: Any) -> LLMClient:
@@ -36,5 +37,6 @@ __all__ = [
     "FireworksClient",
     "GeminiClient",
     "OpenAIClient",
+    "TracedLLMClient",
     "create_llm_client",
 ]

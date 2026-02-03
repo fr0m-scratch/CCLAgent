@@ -5,6 +5,8 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+import random
+import math
 from typing import Any, Callable, Dict, Optional
 
 from ..types import Metrics, NCCLConfig, RunContext, WorkloadSpec
@@ -44,8 +46,12 @@ class WorkloadRunner:
         command: Optional[list[str]] = None,
     ) -> Metrics:
         if self.config.dry_run or not workload.command:
-            metrics = self._simulate_metrics(config, step)
-            self._persist_logs(step, stdout="dry_run", stderr="")
+            sleep_sec = self._sleep_from_env(env_overrides, workload.env)
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
+            metrics = self._simulate_metrics(config, step, env_overrides, workload.env)
+            stdout = self._build_simulated_log(metrics.raw)
+            self._persist_logs(step, stdout=stdout, stderr="")
             self._persist_metrics(metrics, step)
             return metrics
 
@@ -137,7 +143,13 @@ class WorkloadRunner:
             return build_mpi_command(workload)
         return default_cmd
 
-    def _simulate_metrics(self, config: NCCLConfig, step: int) -> Metrics:
+    def _simulate_metrics(
+        self,
+        config: NCCLConfig,
+        step: int,
+        env_overrides: Optional[Dict[str, str]],
+        workload_env: Dict[str, str],
+    ) -> Metrics:
         seed = self._seed_from_config(config)
         base = 1.0 + (seed % 100) / 500.0
         improvement = (step + 1) * 0.01
@@ -146,14 +158,74 @@ class WorkloadRunner:
         comm_time = iter_time * 0.4
         bandwidth = (100.0 + (seed % 50)) * (1.0 + effects["bw_adjust"])
         bandwidth = max(1.0, bandwidth)
+        iter_count = self._iter_count_from_env(env_overrides, workload_env)
+        iter_samples = self._simulate_iter_samples(iter_time * 1000.0, iter_count, seed + step)
+        iter_mean = sum(iter_samples) / max(1, len(iter_samples))
+        variance = sum((v - iter_mean) ** 2 for v in iter_samples) / max(1, len(iter_samples))
+        iter_std = math.sqrt(variance)
+        simulated_total_ms = iter_mean * iter_count
         return Metrics(
-            iteration_time_ms=iter_time * 1000.0,
+            iteration_time_ms=iter_mean,
             comm_time_ms=comm_time * 1000.0,
             algbw_gbps=bandwidth,
             busbw_gbps=bandwidth * 0.9,
             success=True,
-            raw={"simulated": True, "seed": seed, "simulated_effects": effects["details"]},
+            raw={
+                "simulated": True,
+                "seed": seed,
+                "simulated_effects": effects["details"],
+                "iteration_count": iter_count,
+                "iter_samples_ms": iter_samples,
+                "iter_mean_ms": iter_mean,
+                "iter_std_ms": iter_std,
+                "simulated_total_ms": simulated_total_ms,
+            },
         )
+
+    def _sleep_from_env(self, env_overrides: Optional[Dict[str, str]], workload_env: Dict[str, str]) -> float:
+        for source in (env_overrides or {}, workload_env, dict(os.environ)):
+            value = source.get("CCL_SIMULATE_SLEEP_SEC")
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except ValueError:
+                continue
+        return 0.0
+
+    def _iter_count_from_env(self, env_overrides: Optional[Dict[str, str]], workload_env: Dict[str, str]) -> int:
+        for source in (env_overrides or {}, workload_env, dict(os.environ)):
+            value = source.get("CCL_SIMULATE_ITERS")
+            if value is None:
+                continue
+            try:
+                return max(1, int(value))
+            except ValueError:
+                continue
+        return 200
+
+    def _simulate_iter_samples(self, mean_ms: float, count: int, seed: int) -> list[float]:
+        rng = random.Random(seed)
+        samples: list[float] = []
+        sigma = max(1.0, mean_ms * 0.02)
+        for _ in range(count):
+            value = rng.gauss(mean_ms, sigma)
+            samples.append(max(1.0, value))
+        return samples
+
+    def _build_simulated_log(self, raw: Dict[str, Any]) -> str:
+        if not isinstance(raw, dict):
+            return "dry_run"
+        samples = raw.get("iter_samples_ms") or []
+        count = raw.get("iteration_count") or len(samples)
+        header = f"simulated workload: iterations={count}"
+        lines = [header]
+        max_lines = 5000
+        for idx, value in enumerate(samples[:max_lines], start=1):
+            lines.append(f"iter={idx} time_ms={value:.3f}")
+        if len(samples) > max_lines:
+            lines.append(f"... truncated {len(samples) - max_lines} iterations ...")
+        return "\n".join(lines)
 
     def _seed_from_config(self, config: NCCLConfig) -> int:
         payload = "|".join(f"{k}={v}" for k, v in sorted(config.params.items()))

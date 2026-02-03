@@ -265,9 +265,11 @@ class Hypothesis:
     id: str
     summary: str
     patch: Dict[str, Any]
+    mechanism: Optional[str] = None
     expected_effect: Dict[str, str] = field(default_factory=dict)
     risk: str = "low"
     evidence: Dict[str, Any] = field(default_factory=dict)
+    test_plan: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -276,6 +278,7 @@ class CompiledConfig:
     env: Dict[str, str]
     warnings: List[str] = field(default_factory=list)
     risk_score: float = 0.0
+    risk_reasons: List[str] = field(default_factory=list)
 
 
 @dataclass

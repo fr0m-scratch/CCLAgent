@@ -1,0 +1,22 @@
+{
+  "budget": {
+    "max_steps": 12,
+    "min_improvement": 0.01,
+    "patience": 4,
+    "hypothesis_every": 2,
+    "plateau_eps": 0.003,
+    "plateau_window": 5,
+    "stable_steps": 2
+  },
+  "execution": {
+    "mode": "restart_per_step"
+  },
+  "numeric_search": {
+    "mode": "predict_only",
+    "max_candidates": 8,
+    "concurrency": 4
+  },
+  "microbench": {
+    "mode": "dry"
+  }
+}

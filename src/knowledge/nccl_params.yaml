@@ -1,0 +1,48 @@
+NCCL_ALGO:
+  description: "Collective algorithm selection."
+  mechanism: "algorithm_choice"
+  risk: "low"
+NCCL_PROTO:
+  description: "Protocol selection for collectives."
+  mechanism: "protocol_choice"
+  risk: "low"
+NCCL_NTHREADS:
+  description: "Threads per channel."
+  mechanism: "parallelism"
+  risk: "med"
+NCCL_BUFFSIZE:
+  description: "Buffer size in bytes."
+  mechanism: "buffering"
+  risk: "med"
+NCCL_MIN_NCHANNELS:
+  description: "Minimum channels for collectives."
+  mechanism: "channel_parallelism"
+  risk: "med"
+NCCL_MAX_NCHANNELS:
+  description: "Maximum channels for collectives."
+  mechanism: "channel_parallelism"
+  risk: "med"
+NCCL_P2P_LEVEL:
+  description: "P2P level selection."
+  mechanism: "transport_topology"
+  risk: "low"
+NCCL_NET_GDR_LEVEL:
+  description: "GPUDirect RDMA level."
+  mechanism: "transport"
+  risk: "med"
+NCCL_SOCKET_NTHREADS:
+  description: "Socket threads."
+  mechanism: "network_threads"
+  risk: "low"
+NCCL_NSOCKS_PERTHREAD:
+  description: "Sockets per thread."
+  mechanism: "network_sockets"
+  risk: "low"
+NCCL_IB_QPS_PER_CONNECTION:
+  description: "QPs per IB connection."
+  mechanism: "network_qp"
+  risk: "med"
+NCCL_SHM_DISABLE:
+  description: "Disable shared memory transport."
+  mechanism: "transport"
+  risk: "low"

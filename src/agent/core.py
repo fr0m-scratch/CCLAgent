@@ -24,12 +24,17 @@ from .analyzer import TuningAnalyzer
 from .executor import WorkloadExecutor
 from .hypothesis import HypothesisGenerator
 from .numeric import NumericSearchManager
-from .post_run import distill_rules, persist_rules, persist_avoid_rules
+from .post_run import persist_avoid_rules
+from .distill import distill_semantic_rules, persist_rules, persist_report
 from .ext_tuner import ExtTunerServer
 from ..models.training import export_dataset, train_surrogate_model
 from .planner import OfflinePlanner
 from .policy import DecisionPolicy
 from .state import TuningState
+from .metrics_derive import derive_metrics
+from .bottleneck import classify_bottleneck
+from .context_pack import build_context_pack, write_context_pack
+from ..trace import NullTraceEmitter, TraceEmitter
 
 
 logger = setup_logger("cclagent.agent")
@@ -48,6 +53,7 @@ class CCLAgent:
         policy: Optional[DecisionPolicy] = None,
         executor: Optional[WorkloadExecutor] = None,
         run_context=None,
+        trace: TraceEmitter | None = None,
     ) -> None:
         self.config = config
         self.tools = tools
@@ -58,6 +64,7 @@ class CCLAgent:
         self.featurizer = ConfigFeaturizer(self.parameter_space)
         self.surrogate = SurrogateModel(self.featurizer, model_type=config.surrogate.model_type)
         self.run_context = run_context
+        self.trace = trace or NullTraceEmitter()
         self._surrogate_records: list[tuple[NCCLConfig, float]] = []
 
         self.planner = planner or OfflinePlanner(
@@ -68,6 +75,7 @@ class CCLAgent:
             llm=self.llm,
             parameter_space=self.parameter_space,
             run_context=run_context,
+            trace=self.trace,
         )
         self.policy = policy or DecisionPolicy(
             config=config,
@@ -85,10 +93,30 @@ class CCLAgent:
             surrogate=self.surrogate,
             executor=self.executor,
             run_context=run_context,
+            trace=self.trace,
         )
-        self.analyzer = TuningAnalyzer(config=config, hypothesis_generator=self.hypothesis_generator, numeric_manager=self.numeric_manager, compiler=self.tools.compiler, run_context=run_context)
+        self.analyzer = TuningAnalyzer(
+            config=config,
+            hypothesis_generator=self.hypothesis_generator,
+            numeric_manager=self.numeric_manager,
+            compiler=self.tools.compiler,
+            run_context=run_context,
+            trace=self.trace,
+            memory=self.memory,
+        )
 
     def tune(self, workload: WorkloadSpec) -> TuningState:
+        self._trace_event(
+            phase="system",
+            step=None,
+            actor="system",
+            type="run.start",
+            payload={
+                "workload": workload.name,
+                "dry_run": getattr(self.run_context, "dry_run", None),
+                "seed": self.config.seed,
+            },
+        )
         context = self.planner.build_context(workload)
         self._load_surrogate(context)
         microbench = self.planner.offline_plan(workload)
@@ -123,6 +151,32 @@ class CCLAgent:
                 rationale="initial plan" if step == 0 else "apply",
             )
             metrics = self.executor.run(workload, action.config, step, compiled=next_compiled)
+            if self.run_context:
+                derived = derive_metrics(metrics)
+                write_json(
+                    artifact_path(self.run_context, "steps", f"step_{step}_metrics_derived.json"),
+                    {"schema_version": "1.0", "derived": derived},
+                )
+                bottleneck, confidence = classify_bottleneck(derived)
+                write_json(
+                    artifact_path(self.run_context, "steps", f"step_{step}_bottleneck.json"),
+                    {"schema_version": "1.0", "class": bottleneck, "confidence": confidence},
+                )
+                self._trace_event(
+                    phase="online",
+                    step=step,
+                    actor="agent",
+                    type="analysis.metrics.derive",
+                    payload={"derived": derived},
+                    refs=[f"metric:{step}:derived:{k}" for k in derived.keys()],
+                )
+                self._trace_event(
+                    phase="online",
+                    step=step,
+                    actor="agent",
+                    type="analysis.bottleneck.classify",
+                    payload={"class": bottleneck, "confidence": confidence},
+                )
             next_compiled = None
             record = TuningRecord(
                 step=step,
@@ -177,7 +231,41 @@ class CCLAgent:
             )
         self._post_run(state, context)
         self.memory.save()
+        self._trace_event(
+            phase="system",
+            step=None,
+            actor="system",
+            type="run.end",
+            payload={
+                "reason": stop_reason,
+                "steps": len(state.history),
+            },
+        )
         return state
+
+    def _trace_event(
+        self,
+        *,
+        phase: str,
+        step: int | None,
+        actor: str,
+        type: str,
+        payload: dict,
+        refs: list[str] | None = None,
+        status: str = "ok",
+    ) -> None:
+        if not self.run_context:
+            return
+        self.trace.event(
+            run_id=self.run_context.run_id,
+            phase=phase,
+            step=step,
+            actor=actor,
+            type=type,
+            payload=payload,
+            refs=refs,
+            status=status,
+        )
 
     def _persist_step(self, record: TuningRecord, prev_config: NCCLConfig | None = None) -> None:
         if not self.run_context:
@@ -205,6 +293,23 @@ class CCLAgent:
         baseline = state.history[0].metrics.iteration_time_ms
         best = state.best_record.metrics.iteration_time_ms
         improvement = (baseline - best) / max(1e-9, baseline)
+        if self.run_context:
+            ctx_pack = build_context_pack(
+                phase="postrun",
+                step=None,
+                workload=WorkloadSpec(name=context.workload, command=[]),
+                context=context,
+                observations={
+                    "baseline_ms": baseline,
+                    "best_ms": best,
+                    "improvement": improvement,
+                },
+                memory_rules=[],
+                rag_chunks=[],
+                surrogate={"model_type": self.config.surrogate.model_type},
+                constraints={"sla": {"max_iteration_time": self.config.sla_max_iteration_time}},
+            )
+            write_context_pack(artifact_path(self.run_context, "postrun", "context_pack.json"), ctx_pack)
         config_patch = self._diff_configs(state.history[0].action.config, state.best_record.action.config)
         if config_patch:
             self.memory.add_rule(context, config_patch, improvement)
@@ -217,10 +322,26 @@ class CCLAgent:
         dataset_path = f"{self.config.surrogate.dataset_path}/{self._context_hash(context)}.jsonl"
         export_dataset(dataset_records, dataset_path)
         train_surrogate_model(dataset_records, context, self.parameter_space, self.config.surrogate, self._model_path(context))
-        rules = distill_rules(state, context)
+        rules = distill_semantic_rules(state, context)
         for rule in rules:
-            self.memory.add_rule(context, rule["config_patch"], rule["improvement"], evidence=rule.get("evidence"))
-        persist_rules("memory/rules.jsonl", rules)
+            patch = rule.get("action", {}).get("set", {})
+            self.memory.add_rule(context, patch, rule.get("effect", {}).get("improvement", 0.0), evidence=rule)
+        if self.run_context:
+            persist_rules(artifact_path(self.run_context, "postrun", "rules_distilled.jsonl"), rules)
+            persist_report(artifact_path(self.run_context, "postrun", "distillation_report.md"), rules)
+        else:
+            persist_rules("postrun/rules_distilled.jsonl", rules)
+            persist_report("postrun/distillation_report.md", rules)
+        if self.run_context:
+            for rule in rules:
+                self._trace_event(
+                    phase="postrun",
+                    step=None,
+                    actor="agent",
+                    type="postrun.distill.rule",
+                    payload={"rule_id": rule.get("rule_id")},
+                    refs=[],
+                )
         avoids = []
         for record in state.history:
             if not record.metrics.success:
@@ -231,6 +352,15 @@ class CCLAgent:
             write_json(
                 artifact_path(self.run_context, "postrun", "rule_updates.json"),
                 {"rules": rules, "avoid_rules": avoids},
+            )
+            write_json(
+                artifact_path(self.run_context, "postrun", "best_config_validation.json"),
+                {
+                    "schema_version": "1.0",
+                    "executed": False,
+                    "reason": "validation_not_configured",
+                    "best_config": state.best_record.action.config.params,
+                },
             )
 
     def _load_surrogate(self, context: ContextSignature) -> None:

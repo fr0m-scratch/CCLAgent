@@ -40,6 +40,13 @@ class RunState:
     microbench: Optional[Dict[str, Any]] = None
     last_update_ts: float = 0.0
     selected_step: Optional[int] = None
+    trace_events: List[Dict[str, Any]] = None
+    steps_mtime: float = 0.0
+    steps_version: Optional[tuple] = None
+    metrics_series: Optional[Dict[str, List[float]]] = None
+    trace_offset: int = 0
+    trace_mtime: float = 0.0
+    trace_path: Optional[Path] = None
 
 
 class AgentDashboard(App):
@@ -79,6 +86,9 @@ class AgentDashboard(App):
         load_env_file(env_file)
         self.llm = create_llm_client(provider, model) if provider and provider != "none" else NullLLMClient()
         self.state = RunState(steps=[])
+        self._json_cache: Dict[str, tuple[float, Any]] = {}
+        self._render_cache: Dict[str, str] = {}
+        self._artifact_mtime_cache: Dict[str, float] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -97,6 +107,8 @@ class AgentDashboard(App):
                             yield RichLog(id="plan", auto_scroll=False)
                         with TabPane("Tools", id="tab_tools"):
                             yield RichLog(id="tools", auto_scroll=False)
+                        with TabPane("Trace", id="tab_trace"):
+                            yield RichLog(id="trace", auto_scroll=False)
                         with TabPane("Logs", id="tab_logs"):
                             yield RichLog(id="logs", auto_scroll=False)
         with Container(id="chat"):
@@ -121,6 +133,10 @@ class AgentDashboard(App):
         if run_dir is None:
             self._update_status("No runs found under artifacts/")
             return
+        if self.state.run_dir and self.state.run_dir != run_dir:
+            self._json_cache.clear()
+            self.state.trace_offset = 0
+            self.state.trace_events = []
         self.state.run_dir = run_dir
         self.state.run_id = run_dir.name
 
@@ -128,16 +144,22 @@ class AgentDashboard(App):
         self.state.plan = self._read_json(run_dir / "offline" / "initial_plan.json")
 
         steps = self._load_steps(run_dir / "steps")
-        self.state.steps = steps
+        if steps is not None:
+            self.state.steps = steps
         self.state.last_update_ts = time.time()
 
-        available_steps = [rec.get("step") for rec in steps if rec.get("step") is not None]
+        steps_list = self.state.steps or []
+        available_steps = [rec.get("step") for rec in steps_list if rec.get("step") is not None]
         selected = self.state.selected_step
         if selected is None or selected not in available_steps:
             selected = available_steps[-1] if available_steps else None
         self.state.selected_step = selected
         if selected is not None:
             self._load_step_artifacts(selected)
+
+        trace_path = run_dir / "trace" / "events.jsonl"
+        self.state.trace_path = trace_path
+        self._update_trace_cache(trace_path)
 
         self._render_status()
         self._render_steps_table()
@@ -165,9 +187,13 @@ class AgentDashboard(App):
         runs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return runs[0]
 
-    def _load_steps(self, steps_dir: Path) -> List[Dict[str, Any]]:
+    def _load_steps(self, steps_dir: Path) -> Optional[List[Dict[str, Any]]]:
         if not steps_dir.exists():
             return []
+        mtime = steps_dir.stat().st_mtime
+        if self.state.steps_mtime and mtime <= self.state.steps_mtime:
+            return None
+        self.state.steps_mtime = mtime
         records = []
         for path in sorted(steps_dir.glob("step_*.json")):
             if path.name.endswith("_decision.json") or path.name.endswith("_metrics.json"):
@@ -177,13 +203,97 @@ class AgentDashboard(App):
             data = self._read_json(path)
             if data:
                 records.append(data)
+        self.state.metrics_series = self._build_metrics_series(records)
+        self.state.steps_version = (len(records), records[-1].get("step") if records else None)
         return records
 
     def _read_json(self, path: Path) -> Optional[Dict[str, Any]]:
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            mtime = path.stat().st_mtime
+            cached = self._json_cache.get(str(path))
+            if cached and cached[0] >= mtime:
+                return cached[1]
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self._json_cache[str(path)] = (mtime, data)
+            return data
         except Exception:
             return None
+
+    def _load_trace(self, path: Path) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
+        if not path.exists():
+            return events
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except Exception:
+                    continue
+        except Exception:
+            return events
+        return events
+
+    def _update_trace_cache(self, path: Path) -> None:
+        if not path.exists():
+            return
+        size = path.stat().st_size
+        mtime = path.stat().st_mtime
+        if self.state.trace_path != path:
+            self.state.trace_offset = 0
+            self.state.trace_events = []
+        if mtime <= self.state.trace_mtime and size == self.state.trace_offset:
+            return
+        # If first load, tail only last N bytes to avoid lag
+        if self.state.trace_offset == 0 and size > 0:
+            max_bytes = 2_000_000
+            start = max(0, size - max_bytes)
+            with open(path, "rb") as handle:
+                handle.seek(start)
+                raw = handle.read().decode("utf-8", errors="ignore")
+            lines = raw.splitlines()
+            if start > 0 and lines:
+                # drop partial first line
+                lines = lines[1:]
+            self.state.trace_offset = size
+            self.state.trace_mtime = mtime
+            self.state.trace_events = self._parse_trace_lines(lines)
+            return
+        # incremental read
+        with open(path, "rb") as handle:
+            handle.seek(self.state.trace_offset)
+            raw = handle.read().decode("utf-8", errors="ignore")
+        self.state.trace_offset = size
+        self.state.trace_mtime = mtime
+        new_events = self._parse_trace_lines(raw.splitlines())
+        if new_events:
+            self.state.trace_events = (self.state.trace_events or []) + new_events
+
+    def _parse_trace_lines(self, lines: List[str]) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except Exception:
+                continue
+        return events
+
+    def _build_metrics_series(self, records: List[Dict[str, Any]]) -> Dict[str, List[float]]:
+        series = {"iteration_time_ms": [], "algbw_gbps": [], "busbw_gbps": []}
+        for record in records:
+            metrics = record.get("metrics", {})
+            if isinstance(metrics.get("iteration_time_ms"), (int, float)):
+                series["iteration_time_ms"].append(metrics["iteration_time_ms"])
+            if isinstance(metrics.get("algbw_gbps"), (int, float)):
+                series["algbw_gbps"].append(metrics["algbw_gbps"])
+            if isinstance(metrics.get("busbw_gbps"), (int, float)):
+                series["busbw_gbps"].append(metrics["busbw_gbps"])
+        return series
 
     def _update_status(self, text: str) -> None:
         self.query_one("#status", Static).update(text)
@@ -201,6 +311,10 @@ class AgentDashboard(App):
 
     def _render_steps_table(self) -> None:
         table = self.query_one("#steps", DataTable)
+        current_version = self.state.steps_version or (0, None)
+        if getattr(self, "_last_steps_version", None) == current_version:
+            return
+        self._last_steps_version = current_version
         table.clear()
         for record in self.state.steps or []:
             metrics = record.get("metrics", {})
@@ -221,17 +335,10 @@ class AgentDashboard(App):
 
     def _render_metrics(self) -> None:
         panel = self.query_one("#metrics", Static)
-        times = []
-        algbw = []
-        busbw = []
-        for record in self.state.steps or []:
-            metrics = record.get("metrics", {})
-            if isinstance(metrics.get("iteration_time_ms"), (int, float)):
-                times.append(metrics["iteration_time_ms"])
-            if isinstance(metrics.get("algbw_gbps"), (int, float)):
-                algbw.append(metrics["algbw_gbps"])
-            if isinstance(metrics.get("busbw_gbps"), (int, float)):
-                busbw.append(metrics["busbw_gbps"])
+        series = self.state.metrics_series or {"iteration_time_ms": [], "algbw_gbps": [], "busbw_gbps": []}
+        times = series["iteration_time_ms"]
+        algbw = series["algbw_gbps"]
+        busbw = series["busbw_gbps"]
         lines = []
         if times:
             lines.append(Text("iter_ms ") + Text(self._sparkline(times)))
@@ -248,22 +355,34 @@ class AgentDashboard(App):
                 self.state.run_dir / "steps" / f"step_{self.state.selected_step}_metrics.json"
             ) if self.state.run_dir else None
             if metrics:
+                raw = metrics.get("raw", {})
+                if isinstance(raw, dict) and "iter_samples_ms" in raw:
+                    samples = raw.get("iter_samples_ms") or []
+                    raw = dict(raw)
+                    raw["iter_samples_ms"] = f"{len(samples)} samples (omitted)"
+                    metrics = dict(metrics)
+                    metrics["raw"] = raw
                 detail = json.dumps(metrics, indent=2)
         group = Group(*lines)
         if detail:
             group = Group(*lines, Text("\nSelected step metrics:\n" + detail))
+        rendered = Text("\n").join(lines) + Text("\nSelected step metrics:\n" + detail if detail else "")
+        if not self._should_update_panel("metrics", rendered.plain):
+            return
         panel.update(Panel(group, title="Metrics"))
 
     def _render_selected_step(self) -> None:
         self._render_decision()
         self._render_tools()
+        self._render_trace()
         self._render_logs()
 
     def _render_decision(self) -> None:
         panel = self.query_one("#decision", RichLog)
-        panel.clear()
         if self.state.selected_step is None:
-            panel.write("No step selected")
+            if self._should_update_panel("decision", "No step selected"):
+                panel.clear()
+                panel.write("No step selected")
             return
         explanation = self._explain_decision(
             self.state.selected_step,
@@ -278,40 +397,87 @@ class AgentDashboard(App):
             "hypothesis": self.state.hypothesis or {},
             "compiled": self.state.compiled or {},
         }
+        rendered = json.dumps(payload, sort_keys=True)
+        if not self._should_update_panel("decision", rendered):
+            return
+        panel.clear()
         panel.write(Pretty(payload, expand_all=False))
 
     def _render_plan(self) -> None:
         panel = self.query_one("#plan", RichLog)
-        panel.clear()
         explanation = self._explain_plan(self.state.microbench, self.state.plan)
         payload = {
             "explanation": explanation,
             "microbench": self.state.microbench or {},
             "plan": self.state.plan or {},
         }
+        rendered = json.dumps(payload, sort_keys=True)
+        if not self._should_update_panel("plan", rendered):
+            return
+        panel.clear()
         panel.write(Pretty(payload, expand_all=False))
 
     def _render_tools(self) -> None:
         panel = self.query_one("#tools", RichLog)
-        panel.clear()
         if self.state.selected_step is None or not self.state.run_dir:
-            panel.write("No steps yet")
+            if self._should_update_panel("tools", "No steps yet"):
+                panel.clear()
+                panel.write("No steps yet")
             return
         idx = self.state.selected_step
-        tool_payload = self._tool_calls_for_step(idx)
-        panel.write(Pretty(tool_payload, expand_all=False))
+        if self.state.trace_events:
+            events = [
+                e for e in self.state.trace_events
+                if e.get("step") == idx and e.get("type", "").startswith("tool.")
+            ]
+            events = events[-50:]
+            payload = {"step": idx, "events": events}
+            rendered = json.dumps(payload, sort_keys=True)
+            if not self._should_update_panel("tools", rendered):
+                return
+            panel.clear()
+            panel.write(Pretty(payload, expand_all=False))
+        else:
+            tool_payload = self._tool_calls_for_step(idx)
+            rendered = json.dumps(tool_payload, sort_keys=True)
+            if not self._should_update_panel("tools", rendered):
+                return
+            panel.clear()
+            panel.write(Pretty(tool_payload, expand_all=False))
+
+    def _render_trace(self) -> None:
+        panel = self.query_one("#trace", RichLog)
+        if self.state.selected_step is None or not self.state.trace_events:
+            if self._should_update_panel("trace", "No trace events yet"):
+                panel.clear()
+                panel.write("No trace events yet")
+            return
+        idx = self.state.selected_step
+        events = [e for e in self.state.trace_events if e.get("step") == idx]
+        events = events[-200:]
+        payload = {"step": idx, "events": events}
+        rendered = json.dumps(payload, sort_keys=True)
+        if not self._should_update_panel("trace", rendered):
+            return
+        panel.clear()
+        panel.write(Pretty(payload, expand_all=False))
 
     def _render_logs(self) -> None:
         log_widget = self.query_one("#logs", RichLog)
-        log_widget.clear()
         if self.state.selected_step is None or not self.state.run_dir:
-            log_widget.write("No logs yet")
+            if self._should_update_panel("logs", "No logs yet"):
+                log_widget.clear()
+                log_widget.write("No logs yet")
             return
         idx = self.state.selected_step
         stdout_path = self.state.run_dir / "steps" / f"step_{idx}_stdout.log"
         stderr_path = self.state.run_dir / "steps" / f"step_{idx}_stderr.log"
         stdout = self._tail_file(stdout_path)
         stderr = self._tail_file(stderr_path)
+        rendered = "[stdout]\n" + stdout + ("\n[stderr]\n" + stderr if stderr else "")
+        if not self._should_update_panel("logs", rendered):
+            return
+        log_widget.clear()
         log_widget.write("[stdout]\n" + stdout)
         if stderr:
             log_widget.write("\n[stderr]\n" + stderr)
@@ -319,9 +485,15 @@ class AgentDashboard(App):
     def _load_step_artifacts(self, step: int) -> None:
         if not self.state.run_dir:
             return
-        self.state.decision = self._read_json(self.state.run_dir / "steps" / f"step_{step}_decision.json")
-        self.state.hypothesis = self._read_json(self.state.run_dir / "steps" / f"step_{step}_hypothesis.json")
-        self.state.compiled = self._read_json(self.state.run_dir / "steps" / f"step_{step}_compiled_config.json")
+        decision_path = self.state.run_dir / "steps" / f"step_{step}_decision.json"
+        hypothesis_path = self.state.run_dir / "steps" / f"step_{step}_hypothesis.json"
+        compiled_path = self.state.run_dir / "steps" / f"step_{step}_compiled_config.json"
+        if self._artifact_changed(decision_path):
+            self.state.decision = self._read_json(decision_path)
+        if self._artifact_changed(hypothesis_path):
+            self.state.hypothesis = self._read_json(hypothesis_path)
+        if self._artifact_changed(compiled_path):
+            self.state.compiled = self._read_json(compiled_path)
 
     def _infer_step_mode(self, step: Optional[int]) -> str:
         if step is None:
@@ -409,7 +581,17 @@ class AgentDashboard(App):
 
     def _tail_file(self, path: Path) -> str:
         try:
-            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if not path.exists():
+                return ""
+            max_bytes = 256_000
+            size = path.stat().st_size
+            start = max(0, size - max_bytes)
+            with open(path, "rb") as handle:
+                handle.seek(start)
+                raw = handle.read().decode("utf-8", errors="ignore")
+            lines = raw.splitlines()
+            if start > 0 and lines:
+                lines = lines[1:]
             return "\n".join(lines[-self.tail_lines :])
         except Exception:
             return ""
@@ -426,6 +608,25 @@ class AgentDashboard(App):
             idx = int((v - min_v) / span * (len(chars) - 1))
             out.append(chars[idx])
         return "".join(out)
+
+    def _should_update_panel(self, key: str, content: str) -> bool:
+        cached = self._render_cache.get(key)
+        if cached == content:
+            return False
+        self._render_cache[key] = content
+        return True
+
+    def _artifact_changed(self, path: Path) -> bool:
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            return False
+        key = str(path)
+        cached = self._artifact_mtime_cache.get(key)
+        if cached is not None and cached >= mtime:
+            return False
+        self._artifact_mtime_cache[key] = mtime
+        return True
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         question = event.value.strip()

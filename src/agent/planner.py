@@ -18,6 +18,9 @@ from ..types import (
     WorkloadSpec,
 )
 from ..utils import artifact_path, setup_logger, write_json
+from ..trace import TraceEmitter, NullTraceEmitter
+from .context_pack import build_context_pack, write_context_pack
+from .offline_reasoner import OfflineReasoner
 
 
 logger = setup_logger("cclagent.planner")
@@ -41,6 +44,7 @@ class OfflinePlanner:
         llm: LLMClient,
         parameter_space: ParameterSpace,
         run_context: Optional[Any] = None,
+        trace: TraceEmitter | None = None,
     ) -> None:
         self.config = config
         self.tools = tools
@@ -50,9 +54,10 @@ class OfflinePlanner:
         self.parameter_space = parameter_space
         self._rag_loaded = False
         self.run_context = run_context
+        self.trace = trace or NullTraceEmitter()
 
     def build_context(self, workload: WorkloadSpec) -> ContextSignature:
-        return ContextSignature(
+        context = ContextSignature(
             workload=workload.name,
             workload_kind=workload.kind,
             topology=workload.topology,
@@ -66,22 +71,108 @@ class OfflinePlanner:
             nic_count=workload.metadata.get("nic_count"),
             extra=workload.metadata,
         )
+        if self.run_context:
+            write_json(artifact_path(self.run_context, "offline", "context_snapshot.json"), asdict(context))
+            self.trace.event(
+                run_id=self.run_context.run_id,
+                phase="offline",
+                step=None,
+                actor="agent",
+                type="offline.context.detect",
+                payload={"context": asdict(context)},
+            )
+        return context
 
     def offline_plan(self, workload: WorkloadSpec) -> MicrobenchResult:
         logger.info("Running microbench for offline planning.")
+        if self.run_context:
+            self.trace.event(
+                run_id=self.run_context.run_id,
+                phase="offline",
+                step=None,
+                actor="agent",
+                type="offline.microbench.plan",
+                payload={"workload": workload.name, "mode": self.config.microbench.mode},
+            )
         result = self.tools.microbench.run(workload, self.parameter_space)
         if self.run_context:
             write_json(artifact_path(self.run_context, "offline", "microbench_summary.json"), asdict(result))
+            self.trace.event(
+                run_id=self.run_context.run_id,
+                phase="offline",
+                step=None,
+                actor="agent",
+                type="offline.microbench.result",
+                payload={
+                    "important_params": [ip.param for ip in result.important_params],
+                    "signals": [signal.name for signal in result.signals],
+                },
+                refs=[f"microbench:{signal.name}" for signal in result.signals],
+            )
         return result
 
     def build_initial_plan(
         self, workload: WorkloadSpec, microbench: MicrobenchResult, context: ContextSignature
     ) -> InitialConfigPlan:
-        rules = self.memory.retrieve_rules(context, top_k=3)
+        rules_with_scores = self.memory.retrieve_rules_with_scores(context, top_k=3)
+        rules = [item["rule"] for item in rules_with_scores]
         base_params = self.parameter_space.default_config()
-        if rules:
-            for rule in rules[:2]:
-                base_params.update(rule.config_patch)
+        rule_patches = [rule.config_patch for rule in rules[:2]]
+
+        offline_reasoner = OfflineReasoner(self.config.safety)
+        offline_artifacts = offline_reasoner.build_offline_artifacts(
+            self.parameter_space,
+            microbench,
+            rule_patches,
+            self.config.microbench.mode,
+        )
+        if self.run_context:
+            self.trace.event(
+                run_id=self.run_context.run_id,
+                phase="offline",
+                step=None,
+                actor="agent",
+                type="decision.offline_warm_start",
+                payload={
+                    "selected_id": offline_artifacts.warm_start_decision.selected_id,
+                    "reason": offline_artifacts.warm_start_decision.reason,
+                },
+            )
+            if offline_artifacts.pruning:
+                self.trace.event(
+                    run_id=self.run_context.run_id,
+                    phase="offline",
+                    step=None,
+                    actor="agent",
+                    type="search.prune",
+                    payload={
+                        "count": len(offline_artifacts.pruning),
+                        "params": [item.param for item in offline_artifacts.pruning],
+                    },
+                )
+        selected_id = offline_artifacts.warm_start_decision.selected_id
+        selected_candidate = next(
+            (cand for cand in offline_artifacts.warm_start_candidates if cand.candidate_id == selected_id), None
+        )
+        if selected_candidate is not None:
+            base_params = dict(selected_candidate.config)
+
+        if self.run_context:
+            self.trace.event(
+                run_id=self.run_context.run_id,
+                phase="offline",
+                step=None,
+                actor="agent",
+                type="retrieval.memory",
+                payload={
+                    "count": len(rules_with_scores),
+                    "rules": [
+                        {"rule_id": item["rule"].id, "score": item["score"]}
+                        for item in rules_with_scores
+                    ],
+                },
+                refs=[f"rule:{item['rule'].id}" for item in rules_with_scores],
+            )
 
         if not isinstance(self.llm, NullLLMClient):
             parsed = self._propose_llm_config(workload, microbench, context, rules)
@@ -92,6 +183,10 @@ class OfflinePlanner:
         recommended = [ip.param for ip in sorted(important_params, key=lambda x: x.importance, reverse=True)]
         if not recommended:
             recommended = list(self.parameter_space.specs.keys())
+        # apply pruning: fix low-importance params to default by excluding from recommended
+        if offline_artifacts.pruning:
+            pruned = {item.param for item in offline_artifacts.pruning}
+            recommended = [param for param in recommended if param not in pruned] or recommended
 
         constraints = {}
         for name, spec in self.parameter_space.specs.items():
@@ -116,6 +211,57 @@ class OfflinePlanner:
         )
         if self.run_context:
             write_json(artifact_path(self.run_context, "offline", "initial_plan.json"), asdict(plan))
+            write_json(
+                artifact_path(self.run_context, "offline", "microbench_plan.json"),
+                offline_artifacts.microbench_plan,
+            )
+            write_json(
+                artifact_path(self.run_context, "offline", "warm_start_candidates.json"),
+                [cand.__dict__ for cand in offline_artifacts.warm_start_candidates],
+            )
+            write_json(
+                artifact_path(self.run_context, "offline", "warm_start_decision.json"),
+                offline_artifacts.warm_start_decision.__dict__,
+            )
+            write_json(
+                artifact_path(self.run_context, "offline", "search_space_pruning.json"),
+                [item.__dict__ for item in offline_artifacts.pruning],
+            )
+            report = {
+                "summary": "offline plan generated",
+                "warm_start_selected": offline_artifacts.warm_start_decision.selected_id,
+                "pruned_params": [item.param for item in offline_artifacts.pruning],
+            }
+            write_json(artifact_path(self.run_context, "offline", "offline_report.json"), report)
+            with open(artifact_path(self.run_context, "offline", "offline_report.md"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    f"Offline report\n\nSelected warm start: {offline_artifacts.warm_start_decision.selected_id}\n"
+                )
+            rag_chunks = []
+            if self.config.rag and self._rag_loaded:
+                # best-effort: include last retrieval set based on workload signature
+                rag_chunks = [
+                    {"doc_id": doc.doc_id, "chunk_id": doc.chunk_id, "score": doc.score}
+                    for doc in self.rag.search(workload.name, top_k=self.config.rag.top_k)
+                ]
+            ctx_pack = build_context_pack(
+                phase="offline",
+                step=None,
+                workload=workload,
+                context=context,
+                observations={
+                    "important_params": [ip.param for ip in microbench.important_params],
+                    "signals": [signal.name for signal in microbench.signals],
+                },
+                memory_rules=[
+                    {"rule_id": item["rule"].id, "score": item["score"]}
+                    for item in rules_with_scores
+                ],
+                rag_chunks=rag_chunks,
+                surrogate={"model_type": self.config.surrogate.model_type},
+                constraints={"sla": {"max_iteration_time": self.config.sla_max_iteration_time}},
+            )
+            write_context_pack(artifact_path(self.run_context, "offline", "context_pack.json"), ctx_pack)
         return plan
 
     def propose_initial_config(
@@ -177,6 +323,22 @@ class OfflinePlanner:
                 )
             docs = docs + extra_docs
             doc_snippets = self.rag.summarize(docs)
+            if self.run_context:
+                self.trace.event(
+                    run_id=self.run_context.run_id,
+                    phase="offline",
+                    step=None,
+                    actor="agent",
+                    type="retrieval.rag",
+                    payload={
+                        "count": len(docs),
+                        "chunks": [
+                            {"doc_id": doc.doc_id, "chunk_id": doc.chunk_id, "score": doc.score}
+                            for doc in docs
+                        ],
+                    },
+                    refs=[f"rag:{doc.doc_id}:{doc.chunk_id}" for doc in docs],
+                )
 
         rule_text = "\n".join(
             f"Rule: {rule.config_patch} (improvement={rule.improvement:.3f})"

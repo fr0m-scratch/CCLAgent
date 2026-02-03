@@ -38,7 +38,13 @@ class ConfigCompiler:
         merged.update(patch)
         risk = RiskScorer(self.safety).score(NCCLConfig(params=merged))
         risk_score = risk.risk_score
-        return CompiledConfig(config=NCCLConfig(params=merged), env=result.env, warnings=result.warnings, risk_score=risk_score)
+        return CompiledConfig(
+            config=NCCLConfig(params=merged),
+            env=result.env,
+            warnings=result.warnings,
+            risk_score=risk_score,
+            risk_reasons=risk.reasons,
+        )
 
     def _safety_warnings(self, config: NCCLConfig) -> List[str]:
         warnings: List[str] = []

@@ -102,6 +102,24 @@ class MemoryStore:
         scored.sort(key=lambda item: item[0], reverse=True)
         return [rule for score, rule in scored[:top_k] if score > 0]
 
+    def retrieve_rules_with_scores(
+        self, context: ContextSignature, top_k: int = 5, include_negative: bool = False
+    ) -> List[Dict[str, Any]]:
+        context_dict = asdict(context)
+        scored = []
+        for rule in self.rules:
+            if rule.rule_type == "avoid" and not include_negative:
+                continue
+            score = rule_score(rule, context_dict, self.config.half_life_days)
+            scored.append((score, rule))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        out: List[Dict[str, Any]] = []
+        for score, rule in scored[:top_k]:
+            if score <= 0:
+                continue
+            out.append({"rule": rule, "score": score})
+        return out
+
     def mark_rule_usage(self, rule_id: str, success: bool) -> None:
         for rule in self.rules:
             if rule.id != rule_id:
