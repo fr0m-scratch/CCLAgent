@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 from .types import (
     AgentConfig,
     ExecutionConfig,
+    LLMSettings,
     MemoryConfig,
     MetricsConfig,
     MicrobenchSettings,
@@ -138,12 +139,14 @@ def default_agent_config(memory_path: str = "memory/agent_memory.json") -> Agent
     safety = SafetyConfig()
     execution = ExecutionConfig()
     surrogate = SurrogateConfig()
+    llm = LLMSettings()
     memory = MemoryConfig(path=memory_path)
     return AgentConfig(
         parameter_space=parameter_space,
         budget=budget,
         memory=memory,
         rag=rag,
+        llm=llm,
         microbench=microbench,
         metrics=metrics,
         numeric_search=numeric_search,
@@ -191,6 +194,7 @@ def load_agent_config(path: str) -> AgentConfig:
     safety = _merge_dataclass(SafetyConfig(), payload.get("safety", {}))
     execution = _merge_dataclass(ExecutionConfig(), payload.get("execution", {}))
     surrogate = _merge_dataclass(SurrogateConfig(), payload.get("surrogate", {}))
+    llm = _merge_dataclass(LLMSettings(), payload.get("llm", {}))
 
     memory_payload = payload.get("memory", {})
     memory = _merge_dataclass(MemoryConfig(path="memory/agent_memory.json"), memory_payload)
@@ -202,6 +206,7 @@ def load_agent_config(path: str) -> AgentConfig:
         budget=budget,
         memory=memory,
         rag=rag,
+        llm=llm,
         microbench=microbench,
         metrics=metrics,
         numeric_search=numeric_search,

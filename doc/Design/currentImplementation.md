@@ -7,6 +7,9 @@ end-to-end workflows.
 Scope: The details below reflect the code under `src/` and the scripts/workloads in this repo as of the
 current checkout. This is an implementation-focused doc, not a new design proposal.
 
+For a call-by-call walkthrough of a **training** run (CLI → agent → tools → artifacts/trace → post-run),
+see: `doc/Design/end_to_end_training_workflow.md`.
+
 ---
 
 ## 1) Design overview (as implemented)
@@ -49,7 +52,7 @@ lives in `src/agent/` and `src/tools/`.
   - `propose_initial_config`:
     - starts from parameter-space defaults
     - applies top memory rules (exact context match)
-    - optionally queries the LLM using a prompt that includes microbench signals, rules, and RAG snippets
+    - **always** queries the LLM (default provider: Ollama) using a sectioned prompt that includes microbench signals, rules, and RAG snippets
   - RAG is simple Jaccard similarity over documents in `doc/Design` by default.
 
 ### 2.4 Decision policy (hypothesis + numeric)
@@ -98,6 +101,10 @@ lives in `src/agent/` and `src/tools/`.
     - `NCCL_ALGO`, `NCCL_PROTO`, `NCCL_NTHREADS`, `NCCL_BUFFSIZE`,
       `NCCL_MIN_NCHANNELS`, `NCCL_MAX_NCHANNELS`
   - Default RAG docs path: `doc/Design`
+  - Default LLM settings:
+    - provider: `ollama`
+    - model: `deepseek-r1:8b`
+    - prompt window: `max_context_tokens=8000`, `max_response_tokens=512`
   - Config file format:
     - `parameters`: list of `ParameterSpec` entries
     - `budget`: `TuningBudget` fields
@@ -133,7 +140,8 @@ lives in `src/agent/` and `src/tools/`.
 - `src/llm/`
   - OpenAI-compatible client (OpenAI, Fireworks, generic).
   - Claude and Gemini clients (require vendor SDKs).
-  - Null client for non-LLM runs.
+  - Ollama client for local default runs.
+  - Null client for explicit non-LLM runs (if configured).
 - `src/RAG/store.py`
   - In-repo document store with Jaccard similarity search.
 
@@ -246,7 +254,6 @@ Implementation gaps relative to the intended design:
 ## 7) Notes on current defaults
 
 - Dry-run is the default for microbench, workload, training, and nccltest tools.
-- LLM use is optional; `--provider none` disables it.
+- LLM calls are always attempted (even in dry-run); default provider is **Ollama**.
 - Memory persistence is JSON-based and updated after a tuning run.
 - Default RAG docs path is `doc/Design` and should be kept updated.
-

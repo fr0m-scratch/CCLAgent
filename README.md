@@ -53,15 +53,33 @@ What makes it different
 
 Tech stack (design goals)
 -------------------------
-- LLM interface layer under `src/llm` with unified completion API (OpenAI / Claude / Gemini / Fireworks).
+- LLM interface layer under `src/llm` with unified completion API (Ollama / OpenAI / Claude / Gemini / Fireworks).
 - Agent-centric architecture (not a workflow with embedded LLM calls).
 - Tooling interface for: memory/knowledge pool, microbench, workload launch, metric collection, SLA enforcement, config compilation/validation.
 - Modular agent that can interact with NCCL and be used as an ext-net tuner (AutoCCL-style integration).
+
+Default behavior
+----------------
+- The agent **always attempts an LLM call**, even in dry-run.
+- Default provider/model: **Ollama** / `deepseek-r1:8b` (override with `--provider` / `--model` or config).
+
+TUI dashboard
+-------------
+To browse artifacts/trace and inspect **exact LLM prompts + responses**:
+
+```bash
+python3 scripts/agent_tui.py --run-dir artifacts/<run_id>
+```
+
+Notes:
+- If you don’t have the UI deps yet: `pip install textual rich`
+- The dashboard’s interactive chat defaults to **Ollama** / `deepseek-r1:8b` (override with `--provider` / `--model`).
 
 Repository layout
 -----------------
 - `doc/Design/coreNovelty.md` - novelty and phase design
 - `doc/Design/techStack.md` - architecture constraints and goals
+- `doc/Design/end_to_end_training_workflow.md` - call-by-call end-to-end training run walkthrough
 - `doc/figures/` - design diagrams
 - `src/` - implementation (LLM interfaces, agent, tools)
 - `workload/` - workload specs (JSON) for tuning runs

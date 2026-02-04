@@ -5,7 +5,8 @@ from dataclasses import asdict, dataclass
 from typing import Any, List, Optional
 
 from ..RAG import RagStore
-from ..llm import LLMClient, LLMMessage, NullLLMClient
+from ..llm import LLMClient, LLMMessage
+from ..llm.context_window import ContextWindowManager, PromptSection, estimate_tokens
 from ..memory import MemoryStore
 from ..types import (
     ContextSignature,
@@ -32,6 +33,13 @@ class PlannerInputs:
     microbench: MicrobenchResult
     context: ContextSignature
     rules: list[Any]
+
+
+@dataclass
+class PromptBundle:
+    messages: List[LLMMessage]
+    context_window: dict[str, Any]
+    context_refs: list[str]
 
 
 class OfflinePlanner:
@@ -174,10 +182,15 @@ class OfflinePlanner:
                 refs=[f"rule:{item['rule'].id}" for item in rules_with_scores],
             )
 
-        if not isinstance(self.llm, NullLLMClient):
+        parsed = {}
+        try:
             parsed = self._propose_llm_config(workload, microbench, context, rules)
-            if parsed:
-                base_params.update(parsed)
+        except Exception as exc:
+            logger.warning("LLM proposal failed: %s", exc)
+            if not getattr(self.config, "llm", None) or not self.config.llm.allow_fallback:
+                raise
+        if parsed:
+            base_params.update(parsed)
 
         important_params = microbench.important_params
         recommended = [ip.param for ip in sorted(important_params, key=lambda x: x.importance, reverse=True)]
@@ -297,13 +310,24 @@ class OfflinePlanner:
         context: ContextSignature,
         rules: list[Any],
     ) -> dict[str, Any]:
-        prompt = self._build_prompt(PlannerInputs(workload, microbench, context, rules))
-        response = self.llm.complete([LLMMessage(role="user", content=prompt)])
+        bundle = self._build_prompt_bundle(PlannerInputs(workload, microbench, context, rules))
+        response = self.llm.complete(
+            bundle.messages,
+            trace_phase="offline",
+            trace_step=None,
+            system_prompt_version=self.config.llm.system_prompt_version,
+            context_window=bundle.context_window,
+            context_refs=bundle.context_refs,
+            injected_context_refs=bundle.context_refs,
+            max_tokens=self.config.llm.max_response_tokens or 512,
+            temperature=self.config.llm.temperature,
+        )
         parsed = self._parse_config_response(response.content)
         return parsed
 
-    def _build_prompt(self, inputs: PlannerInputs) -> str:
+    def _build_prompt_bundle(self, inputs: PlannerInputs) -> PromptBundle:
         doc_snippets = ""
+        rag_refs = []
         if self.config.rag:
             if not self._rag_loaded:
                 self.rag.load_documents(self.config.rag)
@@ -323,6 +347,7 @@ class OfflinePlanner:
                 )
             docs = docs + extra_docs
             doc_snippets = self.rag.summarize(docs)
+            rag_refs = [f"rag:{doc.doc_id}:{doc.chunk_id}" for doc in docs]
             if self.run_context:
                 self.trace.event(
                     run_id=self.run_context.run_id,
@@ -340,26 +365,51 @@ class OfflinePlanner:
                     refs=[f"rag:{doc.doc_id}:{doc.chunk_id}" for doc in docs],
                 )
 
-        rule_text = "\n".join(
-            f"Rule: {rule.config_patch} (improvement={rule.improvement:.3f})"
+        rule_payload = [
+            {"id": getattr(rule, "id", None), "config_patch": rule.config_patch, "improvement": rule.improvement}
             for rule in inputs.rules[:3]
-        )
-
+        ]
         important_params = [ip.param for ip in inputs.microbench.important_params]
-        signals = {signal.name: signal.value for signal in inputs.microbench.signals}
+        signals = [
+            {
+                "name": signal.name,
+                "value": signal.value,
+                "unit": signal.unit,
+                "confidence": signal.confidence,
+                "source": signal.source,
+            }
+            for signal in inputs.microbench.signals
+        ]
 
-        prompt = (
+        system_text = (
             "You are a CCL tuning agent. Produce a JSON dict of NCCL env var settings. "
-            "Focus on important parameters and keep values valid.\n"
-            f"Workload: {inputs.workload}\n"
-            f"Context: {inputs.context}\n"
-            f"Important params: {important_params}\n"
-            f"Signals: {signals}\n"
-            f"Rules: {rule_text}\n"
-            f"Docs: {doc_snippets}\n"
-            "Return JSON only."
+            "Focus on important parameters and keep values valid. Return JSON only."
         )
-        return prompt
+        sections = [
+            PromptSection(name="WORKLOAD", content=json.dumps(asdict(inputs.workload), indent=2), priority=0),
+            PromptSection(name="CONTEXT", content=json.dumps(asdict(inputs.context), indent=2), priority=0),
+            PromptSection(name="IMPORTANT_PARAMS", content=json.dumps(important_params), priority=0),
+            PromptSection(name="SIGNALS", content=json.dumps(signals, indent=2), priority=0),
+            PromptSection(name="MEMORY_RULES", content=json.dumps(rule_payload, indent=2), priority=1),
+            PromptSection(name="RAG_SNIPPETS", content=doc_snippets, priority=2, max_tokens=800),
+        ]
+        max_context_tokens = self.config.llm.max_context_tokens or 8000
+        max_response_tokens = self.config.llm.max_response_tokens or 512
+        reserve_tokens = estimate_tokens(system_text) + int(max_response_tokens)
+        manager = ContextWindowManager(max_context_tokens, reserve_tokens=reserve_tokens)
+        user_text, ctx_meta = manager.build(sections)
+        ctx_meta["system_tokens"] = estimate_tokens(system_text)
+        ctx_meta["response_token_budget"] = max_response_tokens
+        messages = [
+            LLMMessage(role="system", content=system_text),
+            LLMMessage(role="user", content=user_text),
+        ]
+        context_refs = (
+            [f"microbench:{signal.name}" for signal in inputs.microbench.signals]
+            + [f"rule:{item.get('id')}" for item in rule_payload if item.get("id")]
+            + rag_refs
+        )
+        return PromptBundle(messages=messages, context_window=ctx_meta, context_refs=context_refs)
 
     def _parse_config_response(self, text: str) -> dict[str, Any]:
         try:

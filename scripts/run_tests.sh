@@ -27,6 +27,7 @@ else
 fi
 
 # Lightweight dry-run smoke (no real workloads)
-$PYTHON -m src.main --dry-run >/dev/null
+OLLAMA_MODEL=${OLLAMA_MODEL:-deepseek-r1:8b}
+$PYTHON -m src.main --dry-run --provider ollama --model "$OLLAMA_MODEL" >/dev/null
 
 echo "dry-run OK"

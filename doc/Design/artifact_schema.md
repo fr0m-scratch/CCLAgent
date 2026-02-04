@@ -34,6 +34,12 @@ Required fields:
 - response: object (raw + parsed)
 - validation_errors: array
 
+Optional fields (implementation adds these for full observability):
+- context_refs: array of evidence IDs (memory/microbench/RAG refs used to build context)
+- context_window: object (sectioned prompt window, token budgets, truncation metadata)
+- request_kwargs: object (temperature/max_tokens/options/etc passed to LLM)
+- error: string (present if the LLM call failed)
+
 Candidate Trace
 ---------------
 Path: steps/step_<k>_candidates_trace.json

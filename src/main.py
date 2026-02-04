@@ -86,10 +86,10 @@ def main() -> None:
     parser.add_argument("--workload", help="Path to workload spec JSON.")
     parser.add_argument(
         "--provider",
-        default="none",
-        help="LLM provider (openai, fireworks, claude, gemini, none).",
+        default=None,
+        help="LLM provider (ollama, openai, fireworks, claude, gemini, openai-compatible).",
     )
-    parser.add_argument("--model", default="", help="LLM model name.")
+    parser.add_argument("--model", default=None, help="LLM model name.")
     parser.add_argument("--dry-run", action="store_true", help="Use simulated microbench/workload runs.")
     parser.add_argument(
         "--simulate-workload",
@@ -137,7 +137,9 @@ def main() -> None:
     )
     memory = MemoryStore(agent_config.memory, run_context=run_context)
     rag = RagStore(agent_config.rag)
-    llm = create_llm_client(args.provider, args.model) if args.provider else create_llm_client("none", "")
+    provider = args.provider or agent_config.llm.provider
+    model = args.model or agent_config.llm.model
+    llm = create_llm_client(provider, model)
     llm = TracedLLMClient(llm, trace_emitter, run_context.artifacts_dir, run_context.run_id)
     tools = InstrumentedToolSuite(tools, trace_emitter, run_context.run_id)
     try:

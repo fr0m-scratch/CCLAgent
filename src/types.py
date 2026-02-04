@@ -415,6 +415,17 @@ class ExecutionConfig:
 
 
 @dataclass
+class LLMSettings:
+    provider: str = "ollama"
+    model: str = "deepseek-r1:8b"
+    max_context_tokens: int = 8000
+    max_response_tokens: int = 512
+    temperature: float = 0.2
+    system_prompt_version: str = "offline_v1"
+    allow_fallback: bool = True
+
+
+@dataclass
 class SurrogateConfig:
     model_type: str = "rf"
     refit_every_steps: int = 5
@@ -430,6 +441,7 @@ class AgentConfig:
     budget: TuningBudget
     memory: MemoryConfig
     rag: RagConfig
+    llm: LLMSettings
     microbench: MicrobenchSettings
     metrics: MetricsConfig
     numeric_search: NumericSearchSettings

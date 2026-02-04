@@ -1,7 +1,7 @@
 import unittest
 
 from src.agent.analyzer import TuningAnalyzer
-from src.types import AgentConfig, ExecutionConfig, MemoryConfig, MetricsConfig, MicrobenchSettings, NumericSearchSettings, RagConfig, SafetyConfig, SurrogateConfig, TuningBudget
+from src.types import AgentConfig, ExecutionConfig, LLMSettings, MemoryConfig, MetricsConfig, MicrobenchSettings, NumericSearchSettings, RagConfig, SafetyConfig, SurrogateConfig, TuningBudget
 from src.types import ParameterSpace, ParameterSpec, ContextSignature, Metrics, NCCLConfig
 
 
@@ -35,6 +35,7 @@ class AnalyzerSelectionTest(unittest.TestCase):
             budget=TuningBudget(max_steps=3, hypothesis_every=1),
             memory=MemoryConfig(),
             rag=RagConfig(),
+            llm=LLMSettings(),
             microbench=MicrobenchSettings(),
             metrics=MetricsConfig(),
             numeric_search=NumericSearchSettings(),

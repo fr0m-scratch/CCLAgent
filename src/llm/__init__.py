@@ -7,6 +7,7 @@ from .claude import ClaudeClient
 from .fireworks import FireworksClient
 from .gemini import GeminiClient
 from .openai import OpenAIClient
+from .ollama import OllamaClient
 from .traced_client import TracedLLMClient
 
 
@@ -22,6 +23,8 @@ def create_llm_client(provider: str, model: str, **kwargs: Any) -> LLMClient:
         return GeminiClient(model=model, **kwargs)
     if provider == "openai-compatible":
         return OpenAICompatibleClient(model=model, **kwargs)
+    if provider == "ollama":
+        return OllamaClient(model=model, **kwargs)
     if provider == "none":
         return NullLLMClient()
     raise ValueError(f"Unknown LLM provider: {provider}")
@@ -37,6 +40,7 @@ __all__ = [
     "FireworksClient",
     "GeminiClient",
     "OpenAIClient",
+    "OllamaClient",
     "TracedLLMClient",
     "create_llm_client",
 ]
