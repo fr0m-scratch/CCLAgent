@@ -105,9 +105,22 @@ lives in `src/agent/` and `src/tools/`.
     - provider: `ollama`
     - model: `deepseek-r1:8b`
     - prompt window: `max_context_tokens=8000`, `max_response_tokens=512`
+    - prompt versions:
+      - offline: `offline_strategic_plan_v2`
+      - online: `online_decision_support_v1`
+      - postrun: `postrun_distill_rules_v2`
+    - online LLM: enabled by default with async soft-wait and hard timeout
+  - Default warm-start settings:
+    - mode: `series`
+    - max_candidates: `3`
+    - eval_steps: `50`
+    - eval_timeout_sec: `300`
+    - concurrency: `1`
   - Config file format:
     - `parameters`: list of `ParameterSpec` entries
     - `budget`: `TuningBudget` fields
+    - `warm_start`: warm-start settings
+    - `llm`: LLM settings (including online async behavior)
     - `memory_path`, `rag_docs_path`, `rag_top_k`, `sla_max_iteration_time`
 
 ### 3.3 Tool suite (offline + online)
@@ -191,18 +204,18 @@ This uses simulated microbench + simulated workload metrics.
 python3 -m src.main --workload workload/autoccl/phi2-2b.json --dry-run
 ```
 
-### 5.2 Agent + torchrun demo (local)
+### 5.2 Agentic live showcase (Llama training simulation)
 
-Runs the agent against the AutoCCL torch demo script (requires the AutoCCL submodule checkout).
+Runs the full white-box pipeline in live mode with the curated Llama training workload.
 
 ```bash
-bash scripts/run_agent_torch_demo.sh
+bash scripts/run_agentic_showcase_kimi.sh
 ```
 
 What happens:
-1. `src/main.py` loads `workload/autoccl/torch-demo.json`.
+1. `src.runner` loads `workload/benchmarks/llama3.1-8b-agentic-showcase.json`.
 2. `CCLAgent` runs offline planning (microbench, RAG, memory rules).
-3. Agent applies config and runs `scripts/agent_torchrun_demo.sh` via `TrainingJobRunner`.
+3. Agent applies config and runs simulated training via `TrainingJobRunner` (dry-run + simulate-workload).
 4. Metrics are parsed (JSON expected on stdout).
 5. Agent iterates until plateau/SLA/budget.
 6. Post-run: memory updates are written to `memory/agent_memory.json`.

@@ -14,7 +14,7 @@ If you want a higher-level overview first, read:
 
 Dry-run (simulated microbench + simulated training/workload execution):
 ```bash
-python3 -m src.main --workload workload/autoccl/torch-demo.json --dry-run
+python3 -m src.main --workload workload/benchmarks/llama3.1-8b-agentic-showcase.json --dry-run
 ```
 
 Notes:
@@ -22,21 +22,21 @@ Notes:
 
 Real microbench, simulated training/workload (useful when you don’t want to launch a real job yet):
 ```bash
-python3 -m src.main --workload workload/autoccl/torch-demo.json --simulate-workload
+python3 -m src.main --workload workload/benchmarks/llama3.1-8b-agentic-showcase.json --simulate-workload
 ```
 
 Real run (will actually execute `workload.command`):
 ```bash
-python3 -m src.main --workload workload/autoccl/torch-demo.json
+python3 -m src.main --workload workload/benchmarks/llama3.1-8b-agentic-showcase.json
 ```
 
 Run with an LLM provider (offline planner always calls the LLM; see section 6):
 ```bash
-python3 -m src.main --workload workload/autoccl/torch-demo.json --provider openai --model <model>
+python3 -m src.main --workload workload/benchmarks/llama3.1-8b-agentic-showcase.json --provider openai --model <model>
 ```
 
 Notes:
-- `workload/autoccl/torch-demo.json` has `"kind": "training"`, so the agent will use the **training runner** (`src/tools/training.py`) rather than the generic workload runner (`src/tools/workload.py`).
+- `workload/benchmarks/llama3.1-8b-agentic-showcase.json` has `"kind": "training"`, so the agent will use the **training runner** (`src/tools/training.py`) rather than the generic workload runner (`src/tools/workload.py`).
 - `--simulate-execution` is an alias for `--simulate-workload` (both make training/workload/nccl-tests simulated while microbench can remain real).
 
 ---
@@ -292,12 +292,19 @@ Inside `build_initial_plan`, in order:
      - `search.prune` (if any pruning happened)
 3) Apply the selected warm start:
    - If warm-start candidate selected, `base_params = selected_candidate.config`
-4) Call the LLM to refine the baseline config:
-   - `OfflinePlanner._propose_llm_config(...)`:
+4) Call the LLM to generate a **strategic offline plan**:
+   - `OfflinePlanner._propose_llm_plan(...)`:
      - builds a **sectioned prompt** via `_build_prompt_bundle(...)`
      - calls `llm.complete([system_message, user_message], ...)`
      - parses JSON from the response
-     - merges parsed values into `base_params`
+     - outputs:
+       - `warm_start_program`
+       - `baseline_patch` (<= 6 params)
+       - `pruning_guidance`
+       - `subspace_priors`
+       - `hypothesis_playbook`
+       - `tool_triggers`
+     - merges `baseline_patch` into `base_params` after validation
 5) Build a recommended parameter set for search:
    - Start from `microbench.important_params` sorted by importance.
    - Apply pruning: drop pruned params from the recommended list.
@@ -314,9 +321,14 @@ Offline artifacts written (when `run_context` exists):
 - `artifacts/<run_id>/offline/warm_start_candidates.json`
 - `artifacts/<run_id>/offline/warm_start_decision.json`
 - `artifacts/<run_id>/offline/search_space_pruning.json`
+- `artifacts/<run_id>/offline/warm_start_program.json`
+- `artifacts/<run_id>/offline/hypothesis_playbook.json`
+- `artifacts/<run_id>/offline/pruning_guidance.json`
+- `artifacts/<run_id>/offline/subspace_priors.json`
 - `artifacts/<run_id>/offline/offline_report.json`
 - `artifacts/<run_id>/offline/offline_report.md`
 - `artifacts/<run_id>/offline/context_pack.json` (see `src/agent/context_pack.py`)
+ - `artifacts/<run_id>/offline/llm_strategic_plan.json` (parsed LLM plan, if available)
 
 If RAG is enabled and loaded:
 - `_build_prompt()` calls:
@@ -334,6 +346,18 @@ The online loop is a repeated sequence:
 1) run training under a candidate NCCL config
 2) record results
 3) decide the next config
+
+### 4.X Online decision-support LLM (async, default)
+
+At each step, the analyzer schedules an **online LLM decision-support call** (async):
+- output is persisted to:
+  - `steps/step_<k>_llm_decision_support.json`
+- if the LLM responds within the configured soft-wait window, its output:
+  - augments the hypothesis portfolio
+  - provides numeric search guidance (focus/freezing/subspace bias)
+- if it responds late, the advice is still persisted and can influence later steps.
+
+This preserves a fully agentic online loop without blocking on LLM latency.
 
 ### 4.1 Running a training step: `WorkloadExecutor.run(...)`
 
@@ -647,16 +671,19 @@ Where model_path comes from:
   - default directory: `memory/models/`
   - file name includes the context hash and the run timestamp
 
-### 5.3 Distill semantic rules and persist reports
+### 5.3 Distill semantic rules and persist reports (LLM-first with fallback)
 
 Call chain:
-- `src/agent/distill.py::distill_semantic_rules(state, context)`
-  - produces one rule per changed parameter (best vs baseline)
+- `src/agent/distill_llm.py::distill_rules_llm(...)`
+  - calls the LLM with `postrun_distill_rules_v2`
+  - returns semantic rules with conditions, actions, limitations, and evidence refs
+- If the LLM returns no valid rules:
+  - fallback to `src/agent/distill.py::distill_semantic_rules(state, context)`
 - For each distilled rule:
   - add it to memory via `MemoryStore.add_rule(...)`
 - Persist post-run outputs:
-  - `src/agent/distill.py::persist_rules(artifacts/<run_id>/postrun/rules_distilled.jsonl, rules)`
-  - `src/agent/distill.py::persist_report(artifacts/<run_id>/postrun/distillation_report.md, rules)`
+  - `postrun/rules_distilled.jsonl`
+  - `postrun/distillation_report.md`
 - Emit trace event per distilled rule:
   - `postrun.distill.rule`
 
@@ -682,6 +709,7 @@ Finally, `CCLAgent.tune()`:
 ## 6) LLM layer call flow (what happens when the planner calls an LLM)
 
 The planner **always calls the LLM**, even in dry-run. Default is **Ollama** / `deepseek-r1:8b`, unless overridden via `--provider` or config.
+Additionally, the **online loop schedules LLM decision-support calls** by default (async + soft-wait).
 
 ### 6.1 Client selection
 
@@ -756,6 +784,9 @@ Run directory layout (default):
     - `microbench_summary.json` — `OfflinePlanner.offline_plan`
     - `microbench_stdout_*.log`, `microbench_stderr_*.log` — `MicrobenchRunner._run_real` (real mode)
     - `initial_plan.json`, `warm_start_*.json`, `search_space_pruning.json` — `OfflinePlanner.build_initial_plan`
+    - `warm_start_program.json`, `hypothesis_playbook.json`, `pruning_guidance.json`, `subspace_priors.json`
+    - `llm_strategic_plan.json` (parsed offline LLM plan)
+    - `warm_start_probe_results.json`, `warm_start_probe_decision.json` (if warm-start probes run)
     - `context_pack.json` — `src/agent/context_pack.py` via planner
   - `steps/`
     - `step_<k>.json` — `CCLAgent._persist_step` (action + delta + metrics)
@@ -767,6 +798,7 @@ Run directory layout (default):
     - `step_<k>_context_pack.json` — `TuningAnalyzer.plan_next_action`
     - `step_<k>_decision.json` — `TuningAnalyzer._persist`
     - `step_<k>_decision_record.json` — `TuningAnalyzer._write_decision_record`
+    - `step_<k>_llm_decision_support.json` — online LLM decision support (if enabled)
     - `step_<k>_stop_decision.json`, `step_<k>_rollback_decision.json` — stop/rollback paths
     - hypothesis artifacts: `step_<k>_hypothesis*.json`, `step_<k>_compiled_config.json`, `step_<k>_risk_report.json`
     - numeric artifacts: `step_<k>_candidates*.json`, `step_<k>_pruning_summary.json`, `step_<k>_batch_results.json`
@@ -1038,8 +1070,8 @@ This is a compact map of the **entire `src/` tree** (including modules that are 
 
 ## 9) Scripts (outside `src/`) that matter for “end-to-end training”
 
-- `scripts/run_agent_torch_demo.sh`
-  - runs: `python3 -m src.main --workload workload/autoccl/torch-demo.json`
+- `scripts/run_agentic_showcase_kimi.sh`
+  - runs: `python3 -m src.runner --mode live --config configs/agentic_showcase_kimi.json --workload workload/benchmarks/llama3.1-8b-agentic-showcase.json --provider fireworks --model accounts/fireworks/models/kimi-k2p5 --dry-run --simulate-workload`
 
 - `scripts/agent_torchrun_demo.sh`
   - invoked by the torch demo workload spec

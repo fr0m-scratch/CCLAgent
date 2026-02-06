@@ -1,0 +1,49 @@
+{
+  "artifacts_root": "artifacts",
+  "budget": {
+    "max_steps": 10,
+    "min_improvement": 0.005,
+    "patience": 4,
+    "hypothesis_every": 100,
+    "plateau_eps": 0.002,
+    "plateau_window": 4,
+    "stable_steps": 2
+  },
+  "rag": {
+    "mode": "jaccard",
+    "top_k": 8
+  },
+  "llm": {
+    "provider": "fireworks",
+    "model": "accounts/fireworks/models/kimi-k2p5",
+    "max_context_tokens": 12000,
+    "max_response_tokens": 900,
+    "temperature": 0.1,
+    "online_enabled": true,
+    "online_call_every_steps": 1,
+    "online_soft_wait_s": 1.0,
+    "online_hard_timeout_s": 45,
+    "convergence_enabled": true,
+    "convergence_min_confidence": 0.1,
+    "convergence_require_llm": true,
+    "allow_fallback": true
+  },
+  "warm_start": {
+    "mode": "series",
+    "max_candidates": 3,
+    "eval_steps": 50,
+    "eval_timeout_sec": 300,
+    "concurrency": 1,
+    "counts_toward_budget": false
+  },
+  "microbench": {
+    "mode": "dry"
+  },
+  "numeric_search": {
+    "mode": "predict_only",
+    "max_candidates": 8,
+    "concurrency": 4,
+    "short_eval_steps": 50,
+    "short_eval_timeout_sec": 300
+  }
+}

@@ -19,6 +19,7 @@ class LLMResponse:
     content: str
     model: str
     raw: Any | None = None
+    call_id: str | None = None
 
 
 class LLMError(RuntimeError):
@@ -71,6 +72,7 @@ class OpenAICompatibleClient(LLMClient):
             raise LLMError("api_key is required for OpenAI-compatible clients")
 
         url = self.base_url.rstrip("/") + self.api_path
+        timeout_s = kwargs.pop("timeout_s", None)
         payload = {
             "model": self.model,
             "messages": [message.__dict__ for message in messages],
@@ -87,7 +89,7 @@ class OpenAICompatibleClient(LLMClient):
         }
         headers.update(self.extra_headers)
 
-        response = _post_json(url, payload, headers=headers, timeout_s=self.timeout_s)
+        response = _post_json(url, payload, headers=headers, timeout_s=timeout_s or self.timeout_s)
         content = _extract_openai_content(response)
         _trace_llm_event("response", {"model": self.model, "content": content, "raw": response})
         return LLMResponse(content=content, model=self.model, raw=response)
@@ -112,7 +114,7 @@ def _extract_openai_content(response: Any) -> str:
 
 
 def _trace_llm_event(kind: str, payload: Dict[str, Any]) -> None:
-    if os.getenv("CCL_LLM_TRACE_STDOUT", "1").lower() in ("1", "true", "yes"):
+    if os.getenv("CCL_LLM_TRACE_STDOUT", "0").lower() in ("1", "true", "yes"):
         try:
             print(f"[LLM_TRACE] {json.dumps({'kind': kind, 'payload': payload})}")
         except Exception:

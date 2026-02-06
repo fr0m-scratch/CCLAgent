@@ -1,28 +1,26 @@
 from __future__ import annotations
 
-from .monitor import AgentMonitor
+from .workbench import AgentWorkbench
 
 
-class AgentDashboard(AgentMonitor):
-    """Backward-compatible alias used by scripts/agent_tui.py."""
+class AgentMonitor(AgentWorkbench):
+    """Inspect/monitor mode app for completed or ongoing runs."""
 
     def __init__(
         self,
         artifacts_root: str = "artifacts",
         run_dir: str | None = None,
-        provider: str = "none",
-        model: str = "",
-        env_file: str = ".env.local",
         poll_interval: float = 1.0,
-        tail_lines: int = 200,
+        env_file: str = ".env.local",
     ) -> None:
-        # provider/model/tail_lines kept for CLI compatibility.
         super().__init__(
+            bridge=None,
             artifacts_root=artifacts_root,
             run_dir=run_dir,
             poll_interval=poll_interval,
             env_file=env_file,
+            live_mode=False,
         )
 
 
-__all__ = ["AgentDashboard"]
+__all__ = ["AgentMonitor"]

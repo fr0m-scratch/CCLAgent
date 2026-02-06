@@ -40,6 +40,50 @@ Optional fields (implementation adds these for full observability):
 - request_kwargs: object (temperature/max_tokens/options/etc passed to LLM)
 - error: string (present if the LLM call failed)
 
+WarmStart Program
+-----------------
+Path: offline/warm_start_program.json
+
+Required fields:
+- schema_version: "1.0"
+- mode: "single" | "series"
+- candidates: array of objects with:
+  - id: string
+  - summary: string
+  - patch: object (param->value)
+  - mechanism: string
+  - risk_hint: string (low|medium|high)
+  - evidence_refs: array of evidence IDs
+  - eval_plan: object (mode/steps/timeout)
+- selection_rule: object (objective + tie_breaker)
+
+Optional fields:
+- claims: array of objects (claim + refs)
+- uncertainty: object (level + missing_evidence + safe_fallback)
+
+Online Decision Support Output
+------------------------------
+Path: steps/step_<k>_llm_decision_support.json
+
+Required fields:
+- schema_version: "1.0"
+- step: integer
+- call_id: string
+- used_in_decision: bool
+- output: object (the parsed LLM output)
+- parse_errors: array
+
+Online LLM Advice (Late)
+------------------------
+Path: online/llm_advice_step_<k>.json
+
+Required fields:
+- schema_version: "1.0"
+- step: integer
+- call_id: string
+- output: object (the parsed LLM output)
+- parse_errors: array
+
 Candidate Trace
 ---------------
 Path: steps/step_<k>_candidates_trace.json

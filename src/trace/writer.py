@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Any, Dict, Optional
 
 from .events import TraceEvent
@@ -15,15 +16,18 @@ class TraceWriter:
         os.makedirs(self.trace_dir, exist_ok=True)
         self.events_path = os.path.join(self.trace_dir, "events.jsonl")
         self._handle = open(self.events_path, "a", encoding="utf-8")
+        self._lock = threading.Lock()
 
     def write_event(self, event: TraceEvent) -> None:
         payload = event.to_dict()
-        self._handle.write(json.dumps(payload) + "\n")
-        self._handle.flush()
+        with self._lock:
+            self._handle.write(json.dumps(payload) + "\n")
+            self._handle.flush()
 
     def close(self) -> None:
         try:
-            self._handle.close()
+            with self._lock:
+                self._handle.close()
         except Exception:
             pass
 

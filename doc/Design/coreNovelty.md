@@ -30,7 +30,7 @@ Core loop:
 * **Analyze metrics & plan next action**.
 * Two complementary action modes:
 
-  1. **Hypothesis-driven step (knowledge-guided):** propose a causal hypothesis (“bottleneck is channel count / chunking / algo path”), compile a config from that hypothesis, then apply it. For every hypothesis, the agent should use surrogated model trained if available (from Phase 3) to predict performance and carefully provide semantic knowledge guided hypotheses with justifications.
+  1. **Hypothesis-driven step (knowledge-guided):** llm-based agent will propose a causal hypothesis with semantic reasoning (“bottleneck is channel count / chunking / algo path”), compile a config from that hypothesis, then apply it. For every hypothesis, the agent should use surrogated model trained if available (from Phase 3) to predict performance and carefully provide semantic knowledge guided hypotheses with justifications.
    
   2. **Numeric search step (budgeted):** do constrained, small-step exploration in the pruned subspace (only the parameters judged important), then apply the best candidate.
 

@@ -4,15 +4,13 @@ import logging
 import os
 import sys
 
-_DEFAULT_LEVEL = os.getenv("CCL_AGENT_LOG_LEVEL", "INFO").upper()
-
-
 def setup_logger(name: str, level: str | int | None = None) -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger
 
-    resolved_level = level if level is not None else _DEFAULT_LEVEL
+    default_level = os.getenv("CCL_AGENT_LOG_LEVEL", "INFO").upper()
+    resolved_level = level if level is not None else default_level
     logger.setLevel(resolved_level)
 
     handler = logging.StreamHandler(sys.stdout)

@@ -45,12 +45,16 @@ class NumericSearchManager:
         base_config: NCCLConfig,
         step: int,
         context=None,
+        guidance: Dict[str, Any] | None = None,
     ) -> tuple[NCCLConfig, SearchResult]:
         if state.search_state is None:
             state.search_state = SearchState()
         base_config = base_config or plan.baseline_config
+        if guidance is None and getattr(plan, "subspace_priors", None):
+            guidance = {"subspace_bias": plan.subspace_priors}
+        plan_subspaces = self._apply_guidance(plan.candidate_subspaces, guidance or {})
         raw_candidates = self.cd.propose_candidates(
-            plan_subspaces=plan.candidate_subspaces,
+            plan_subspaces=plan_subspaces,
             state=state.search_state,
             base_config=base_config,
             max_candidates=self.config.numeric_search.max_candidates,
@@ -172,7 +176,7 @@ class NumericSearchManager:
         self._record_evaluated(state.search_state, search_candidates)
         self._persist_state(state.search_state)
         self._persist_candidates(step, search_candidates)
-        self._persist_candidate_trace(step, trace_records)
+        self._persist_candidate_trace(step, trace_records, guidance=guidance)
         self._persist_pruning_summary(step, trace_records)
         if self.run_context and self.trace:
             self.trace.event(
@@ -229,12 +233,15 @@ class NumericSearchManager:
         ]
         write_json(artifact_path(self.run_context, "steps", f"step_{step}_candidates.json"), payload)
 
-    def _persist_candidate_trace(self, step: int, trace_records: List[Dict[str, Any]]) -> None:
+    def _persist_candidate_trace(
+        self, step: int, trace_records: List[Dict[str, Any]], guidance: Dict[str, Any] | None = None
+    ) -> None:
         if not self.run_context:
             return
         payload = {
             "schema_version": "1.0",
             "step": step,
+            "guidance": guidance or {},
             "candidates": trace_records,
         }
         write_json(artifact_path(self.run_context, "steps", f"step_{step}_candidates_trace.json"), payload)
@@ -258,6 +265,37 @@ class NumericSearchManager:
                     reason = info.get("reason", stage)
                     summary[reason] = summary.get(reason, 0) + 1
         return summary
+
+    def _apply_guidance(self, subspaces: List[Any], guidance: Dict[str, Any]) -> List[Any]:
+        if not guidance:
+            return subspaces
+        focus_params = guidance.get("focus_params") if isinstance(guidance, dict) else None
+        freeze_params = guidance.get("freeze_params") if isinstance(guidance, dict) else None
+        if focus_params and not isinstance(focus_params, list):
+            focus_params = None
+        if freeze_params and not isinstance(freeze_params, list):
+            freeze_params = None
+        adjusted: List[Any] = []
+        for subspace in subspaces:
+            free = list(subspace.free or [])
+            if focus_params:
+                filtered = [p for p in free if p in focus_params]
+                if filtered:
+                    free = filtered
+            if freeze_params:
+                free = [p for p in free if p not in freeze_params]
+            adjusted.append(
+                type(subspace)(
+                    name=subspace.name,
+                    fixed=dict(subspace.fixed),
+                    free=free or list(subspace.free or []),
+                )
+            )
+        bias = guidance.get("subspace_bias") if isinstance(guidance, dict) else None
+        if isinstance(bias, list):
+            weight_map = {item.get("name"): item.get("weight", 1.0) for item in bias if isinstance(item, dict)}
+            adjusted.sort(key=lambda s: weight_map.get(s.name, 1.0), reverse=True)
+        return adjusted
 
     def _persist_state(self, state: SearchState) -> None:
         if not self.run_context:

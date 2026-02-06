@@ -23,6 +23,7 @@ class WorkloadExecutor:
         compiled: Optional[CompiledConfig] = None,
         execution_mode: str = "restart_per_step",
         extra_env: Optional[Dict[str, str]] = None,
+        artifact_subdir: str = "steps",
     ):
         apply_result = self.tools.nccl.apply(config)
         if not apply_result.ok:
@@ -44,7 +45,7 @@ class WorkloadExecutor:
 
         if self.run_context:
             write_json(
-                artifact_path(self.run_context, "steps", f"step_{step}_final_env.json"),
+                artifact_path(self.run_context, artifact_subdir, f"step_{step}_final_env.json"),
                 {"env": env_overrides},
             )
 
@@ -53,7 +54,7 @@ class WorkloadExecutor:
         if workload_kind in ("training", "train") and getattr(self.tools, "training", None) is not None:
             runner = self.tools.training
 
-        metrics = runner.run(workload, config, step=step, env_overrides=env_overrides)
+        metrics = runner.run(workload, config, step=step, env_overrides=env_overrides, artifact_subdir=artifact_subdir)
         sla_result = self.tools.sla.check(metrics)
         metrics.raw["sla_ok"] = sla_result.ok
         metrics.raw["sla_violations"] = sla_result.violations
@@ -69,20 +70,31 @@ class WorkloadExecutor:
         step: int,
         eval_mode: str = "short",
         concurrency: int = 1,
+        artifact_subdir: str = "steps",
+        eval_steps_override: int | None = None,
+        eval_timeout_override: int | None = None,
     ) -> list[tuple[NCCLConfig, Any]]:
         results: list[tuple[NCCLConfig, Any]] = []
 
         def _run_one(idx: int, candidate: NCCLConfig) -> tuple[NCCLConfig, Any]:
             config_step = step * 100 + idx
             env_overrides = {"CCL_EVAL_MODE": eval_mode}
-            if workload.eval_steps:
-                env_overrides["CCL_EVAL_STEPS"] = str(workload.eval_steps)
-            if workload.eval_timeout_sec:
-                env_overrides["CCL_EVAL_TIMEOUT_SEC"] = str(workload.eval_timeout_sec)
-            metrics = self.run(workload, candidate, config_step, extra_env=env_overrides)
+            eval_steps = eval_steps_override if eval_steps_override is not None else workload.eval_steps
+            eval_timeout = eval_timeout_override if eval_timeout_override is not None else workload.eval_timeout_sec
+            if eval_steps:
+                env_overrides["CCL_EVAL_STEPS"] = str(eval_steps)
+            if eval_timeout:
+                env_overrides["CCL_EVAL_TIMEOUT_SEC"] = str(eval_timeout)
+            metrics = self.run(
+                workload,
+                candidate,
+                config_step,
+                extra_env=env_overrides,
+                artifact_subdir=artifact_subdir,
+            )
             if self.run_context:
                 write_json(
-                    artifact_path(self.run_context, "steps", f"step_{step}_candidate_{idx}_metrics.json"),
+                    artifact_path(self.run_context, artifact_subdir, f"step_{step}_candidate_{idx}_metrics.json"),
                     metrics.__dict__,
                 )
             return candidate, metrics

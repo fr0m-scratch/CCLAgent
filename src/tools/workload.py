@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import random
 import math
 from typing import Any, Callable, Dict, Optional
+from pathlib import Path
 
 from ..types import Metrics, NCCLConfig, RunContext, WorkloadSpec
 from .launchers import build_mpi_command, build_slurm_command, build_torchrun_command
@@ -44,6 +45,7 @@ class WorkloadRunner:
         env_overrides: Optional[Dict[str, str]] = None,
         execution_env: Optional[Dict[str, str]] = None,
         command: Optional[list[str]] = None,
+        artifact_subdir: str = "steps",
     ) -> Metrics:
         if self.config.dry_run or not workload.command:
             sleep_sec = self._sleep_from_env(env_overrides, workload.env)
@@ -51,8 +53,8 @@ class WorkloadRunner:
                 time.sleep(sleep_sec)
             metrics = self._simulate_metrics(config, step, env_overrides, workload.env)
             stdout = self._build_simulated_log(metrics.raw)
-            self._persist_logs(step, stdout=stdout, stderr="")
-            self._persist_metrics(metrics, step)
+            self._persist_logs(step, stdout=stdout, stderr="", artifact_subdir=artifact_subdir)
+            self._persist_metrics(metrics, step, artifact_subdir=artifact_subdir)
             return metrics
 
         env = dict(execution_env) if execution_env is not None else os.environ.copy()
@@ -103,9 +105,9 @@ class WorkloadRunner:
             metrics = Metrics(iteration_time_ms=elapsed * 1000.0, raw={"raw": raw_output})
 
         if self.run_context:
-            self._persist_logs(step, stdout=result.stdout, stderr=result.stderr)
+            self._persist_logs(step, stdout=result.stdout, stderr=result.stderr, artifact_subdir=artifact_subdir)
             write_json(
-                artifact_path(self.run_context, "steps", f"workload_cmd_step_{step}.json"),
+                artifact_path(self.run_context, artifact_subdir, f"workload_cmd_step_{step}.json"),
                 {
                     "command": cmd,
                     "launcher": workload.launcher,
@@ -114,19 +116,21 @@ class WorkloadRunner:
                 },
             )
 
-        self._persist_metrics(metrics, step)
+        self._persist_metrics(metrics, step, artifact_subdir=artifact_subdir)
         return metrics
 
-    def _persist_metrics(self, metrics: Metrics, step: int) -> None:
+    def _persist_metrics(self, metrics: Metrics, step: int, artifact_subdir: str = "steps") -> None:
         if not self.run_context:
             return
-        write_json(artifact_path(self.run_context, "steps", f"step_{step}_metrics.json"), metrics.__dict__)
+        write_json(artifact_path(self.run_context, artifact_subdir, f"step_{step}_metrics.json"), metrics.__dict__)
 
-    def _persist_logs(self, step: int, stdout: str, stderr: str) -> None:
+    def _persist_logs(self, step: int, stdout: str, stderr: str, artifact_subdir: str = "steps") -> None:
         if not self.run_context:
             return
-        stdout_path = artifact_path(self.run_context, "steps", f"step_{step}_stdout.log")
-        stderr_path = artifact_path(self.run_context, "steps", f"step_{step}_stderr.log")
+        stdout_path = artifact_path(self.run_context, artifact_subdir, f"step_{step}_stdout.log")
+        stderr_path = artifact_path(self.run_context, artifact_subdir, f"step_{step}_stderr.log")
+        Path(stdout_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(stderr_path).parent.mkdir(parents=True, exist_ok=True)
         with open(stdout_path, "w", encoding="utf-8") as handle:
             handle.write(stdout)
         with open(stderr_path, "w", encoding="utf-8") as handle:

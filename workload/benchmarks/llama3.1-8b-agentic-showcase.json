@@ -1,0 +1,24 @@
+{
+  "name": "autoccl-llama3.1-8b-agentic-showcase",
+  "kind": "training",
+  "command": [],
+  "nodes": 4,
+  "gpus_per_node": 8,
+  "topology": "a40-pcie-8gpu",
+  "scale": "32-gpu",
+  "env": {
+    "CCL_SIM_PROFILE": "llama_showcase_30pct",
+    "CCL_SIMULATE_ITERS": "320",
+    "CCL_SIMULATE_SLEEP_SEC": "0.35"
+  },
+  "metadata": {
+    "model": "Llama-3.1-8B",
+    "category": "llm",
+    "parallelism": "TP(8)+DP(4)",
+    "collectives": ["AllGather", "ReduceScatter", "AllReduce"],
+    "cluster": "4-node, 32xA40, PCIe intra, 100Gbps IB",
+    "framework": "PyTorch + Megatron-LM",
+    "source": "AutoCCL NSDI'25 evaluation",
+    "showcase_note": "Curated dry-run profile for agentic online reasoning demos with async-LLM lane control."
+  }
+}

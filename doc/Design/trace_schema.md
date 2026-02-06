@@ -63,6 +63,9 @@ Offline:
 - offline.microbench.run
 - offline.microbench.result
 - decision.offline_warm_start
+- decision.warm_start_program
+- warmstart.probe.run
+- warmstart.probe.select
 - search.prune
 
 Online:
@@ -75,6 +78,7 @@ Online:
 - safety.risk_score
 - safety.rollback
 - stop.decision
+- llm.advice
 
 Tools:
 - tool.call
@@ -96,7 +100,7 @@ Example event
   "type": "decision.select_action",
   "payload": {
     "action": "hypothesis",
-    "summary": "apply memory rule",
+    "summary": "NCCL_MAX_NCHANNELS seems too low for 32-GPU scale; increase channels to reduce ring under-utilization",
     "risk_score": 0.22
   },
   "refs": ["rule:abcd", "metric:3:primary"],

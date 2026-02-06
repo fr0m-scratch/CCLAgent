@@ -83,6 +83,11 @@ class TracedLLMClient(LLMClient):
         )
         if error:
             raise RuntimeError(error)
+        if response is not None:
+            try:
+                response.call_id = call_id
+            except Exception:
+                pass
         return response
 
 

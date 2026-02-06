@@ -17,6 +17,7 @@ from .types import (
     SafetyConfig,
     SurrogateConfig,
     TuningBudget,
+    WarmStartSettings,
     WorkloadSpec,
 )
 from .utils import read_json
@@ -140,6 +141,7 @@ def default_agent_config(memory_path: str = "memory/agent_memory.json") -> Agent
     execution = ExecutionConfig()
     surrogate = SurrogateConfig()
     llm = LLMSettings()
+    warm_start = WarmStartSettings()
     memory = MemoryConfig(path=memory_path)
     return AgentConfig(
         parameter_space=parameter_space,
@@ -147,6 +149,7 @@ def default_agent_config(memory_path: str = "memory/agent_memory.json") -> Agent
         memory=memory,
         rag=rag,
         llm=llm,
+        warm_start=warm_start,
         microbench=microbench,
         metrics=metrics,
         numeric_search=numeric_search,
@@ -195,6 +198,7 @@ def load_agent_config(path: str) -> AgentConfig:
     execution = _merge_dataclass(ExecutionConfig(), payload.get("execution", {}))
     surrogate = _merge_dataclass(SurrogateConfig(), payload.get("surrogate", {}))
     llm = _merge_dataclass(LLMSettings(), payload.get("llm", {}))
+    warm_start = _merge_dataclass(WarmStartSettings(), payload.get("warm_start", {}))
 
     memory_payload = payload.get("memory", {})
     memory = _merge_dataclass(MemoryConfig(path="memory/agent_memory.json"), memory_payload)
@@ -207,6 +211,7 @@ def load_agent_config(path: str) -> AgentConfig:
         memory=memory,
         rag=rag,
         llm=llm,
+        warm_start=warm_start,
         microbench=microbench,
         metrics=metrics,
         numeric_search=numeric_search,

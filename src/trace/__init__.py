@@ -3,6 +3,12 @@ from .emitter import TraceEmitter, TraceEmitterWriter, NullTraceEmitter
 from .writer import TraceWriter
 from .reader import read_events, filter_events
 from .span import TraceSpan
+from .validator import (
+    TraceValidationReport,
+    validate_event_refs,
+    validate_event_schema,
+    validate_trace_file,
+)
 
 __all__ = [
     "TraceEvent",
@@ -14,4 +20,8 @@ __all__ = [
     "read_events",
     "filter_events",
     "TraceSpan",
+    "TraceValidationReport",
+    "validate_event_refs",
+    "validate_event_schema",
+    "validate_trace_file",
 ]

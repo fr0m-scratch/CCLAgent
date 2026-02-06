@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from ..types import (
     HypothesisAction,
@@ -10,9 +10,11 @@ from ..types import (
     StopAction,
     TuningAction,
     NCCLConfig,
+    Hypothesis,
 )
 from ..utils import artifact_path, setup_logger, write_json
 from ..trace import TraceEmitter, NullTraceEmitter
+from .decision_bundle import build_decision_bundle, validate_decision_bundle
 from .context_pack import build_context_pack, write_context_pack
 from .stop_policy import StopPolicy
 
@@ -30,6 +32,7 @@ class TuningAnalyzer:
         run_context=None,
         trace: TraceEmitter | None = None,
         memory: Any | None = None,
+        llm_advisor: Any | None = None,
     ):
         self.config = config
         self.hypothesis_generator = hypothesis_generator
@@ -39,6 +42,7 @@ class TuningAnalyzer:
         self.trace = trace or NullTraceEmitter()
         self.memory = memory
         self.stop_policy = StopPolicy(config)
+        self.llm_advisor = llm_advisor
 
     def plan_next_action(
         self,
@@ -51,6 +55,9 @@ class TuningAnalyzer:
         workload=None,
         base_config=None,
     ):
+        ctx_pack = None
+        recent_history = None
+        llm_requested = bool(self.llm_advisor and self._should_request_llm_advice(step, state, last_metrics))
         if self.run_context and workload is not None:
             memory_rules = []
             if self.memory is not None:
@@ -85,12 +92,83 @@ class TuningAnalyzer:
                 constraints=constraints,
             )
             write_context_pack(artifact_path(self.run_context, "steps", f"step_{step}_context_pack.json"), ctx_pack)
+
+            # Schedule online LLM advice (async) if enabled.
+            if self.llm_advisor and llm_requested:
+                recent_history = {
+                    "steps": [
+                        {
+                            "step": rec.step,
+                            "iteration_time_ms": rec.metrics.iteration_time_ms,
+                            "success": rec.metrics.success,
+                            "config": rec.action.config.params,
+                        }
+                        for rec in state.history[-5:]
+                    ],
+                    "best_ms": state.best_record.metrics.iteration_time_ms if state.best_record else None,
+                    "plateau_count": state.plateau_count,
+                }
+                param_specs = {name: asdict(spec) for name, spec in self.compiler.parameter_space.specs.items()}
+                recent_pruning = {"pruning_guidance": plan.pruning_guidance if plan else []}
+                playbook = plan.hypothesis_playbook if plan else []
+                self.llm_advisor.request(
+                    step=step,
+                    context_pack=ctx_pack,
+                    playbook=playbook,
+                    param_specs=param_specs,
+                    recent_history=recent_history,
+                    recent_pruning=recent_pruning,
+                )
         decision = {
             "step": step,
             "plateau": state.should_stop,
             "last_success": last_metrics.success if last_metrics else True,
             "sla_rollback": last_metrics.raw.get("sla_rollback") if last_metrics else False,
         }
+
+        advice = None
+        decision_advice = None
+        advice_used = False
+        if self.llm_advisor and llm_requested:
+            timeout_s = getattr(self.config.llm, "online_soft_wait_s", 0.0) if getattr(self.config, "llm", None) else 0.0
+            advice = self.llm_advisor.try_get(step=step, timeout_s=timeout_s)
+            # Collect any late advice from previous steps and persist it.
+            late_ready = self.llm_advisor.collect_ready()
+            for late in late_ready:
+                if late.step == step and advice is None:
+                    advice = late
+                elif late.step != step:
+                    self._persist_late_llm_advice(late)
+        if self._is_decision_eligible_advice(advice):
+            decision_advice = advice
+
+        tool_request_info = self._evaluate_tool_request(decision_advice)
+        if tool_request_info:
+            decision["tool_request"] = tool_request_info
+            if tool_request_info.get("accepted"):
+                advice_used = True
+        action_preference = self._action_preference_from_advice(decision_advice)
+        if action_preference:
+            decision["action_preference"] = action_preference
+            if action_preference != "auto":
+                advice_used = True
+        llm_convergence = self._convergence_from_advice(decision_advice)
+        explicit_convergence_advice = None
+        if llm_convergence is None and self.llm_advisor is not None and self._llm_convergence_enabled():
+            explicit_convergence_advice = self._request_explicit_convergence(
+                step=step,
+                state=state,
+                last_metrics=last_metrics,
+                context_pack=ctx_pack,
+                recent_history=recent_history,
+            )
+            llm_convergence = self._convergence_from_advice(explicit_convergence_advice)
+            if llm_convergence:
+                advice_used = True
+                decision["llm_convergence_call_id"] = getattr(explicit_convergence_advice, "call_id", None)
+        if llm_convergence:
+            decision["llm_convergence"] = llm_convergence
+            advice_used = True
 
         if last_metrics and (not last_metrics.success or last_metrics.raw.get("sla_rollback")):
             if state.last_known_good is not None:
@@ -114,29 +192,113 @@ class TuningAnalyzer:
                         type="safety.rollback",
                         payload={"reason": "sla_or_failure"},
                     )
-                self._write_decision_record(step, action, state, why_selected=["sla_or_failure"], why_rejected=[])
+                self._write_decision_record(
+                    step,
+                    action,
+                    state,
+                    why_selected=["sla_or_failure"],
+                    why_rejected=[],
+                    advice=decision_advice,
+                )
+                self._persist_llm_advice(step, advice, advice_used)
+                self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
                 return action
             action = StopAction(kind="stop", reason="failure_without_rollback")
             decision["action"] = "stop"
             self._persist(decision, step)
-            self._write_decision_record(step, action, state, why_selected=["failure_without_rollback"], why_rejected=[])
+            self._write_decision_record(
+                step,
+                action,
+                state,
+                why_selected=["failure_without_rollback"],
+                why_rejected=[],
+                advice=decision_advice,
+            )
+            self._persist_llm_advice(step, advice, advice_used)
+            self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
             return action
 
-        stop_decision = self.stop_policy.evaluate(state, step)
+        if llm_convergence and llm_convergence.get("decision") == "stop":
+            reason = llm_convergence.get("reason") or "llm_convergence"
+            action = StopAction(kind="stop", reason=f"llm_convergence:{reason}")
+            decision["action"] = "stop"
+            decision["reason"] = action.reason
+            self._persist(decision, step)
+            if self.run_context:
+                claims_raw = llm_convergence.get("claims") if isinstance(llm_convergence.get("claims"), list) else []
+                claims = self._claims_with_refs(
+                    claims_raw if claims_raw else [reason],
+                    self._default_reason_refs(step, advice=explicit_convergence_advice or decision_advice),
+                )
+                write_json(
+                    artifact_path(self.run_context, "steps", f"step_{step}_stop_decision.json"),
+                    {
+                        "schema_version": "1.0",
+                        "reason": action.reason,
+                        "source": "llm",
+                        "confidence": llm_convergence.get("confidence"),
+                        "claims": claims,
+                    },
+                )
+                stop_refs = self._extract_refs_from_claims(claims) or self._default_reason_refs(
+                    step,
+                    advice=explicit_convergence_advice or decision_advice,
+                )
+                self.trace.event(
+                    run_id=self.run_context.run_id,
+                    phase="online",
+                    step=step,
+                    actor="llm",
+                    type="stop.decision",
+                    payload={
+                        "reason": action.reason,
+                        "source": "llm",
+                        "confidence": llm_convergence.get("confidence"),
+                    },
+                    refs=stop_refs,
+                )
+            self._write_decision_record(
+                step,
+                action,
+                state,
+                why_selected=[action.reason],
+                why_rejected=[],
+                advice=explicit_convergence_advice or decision_advice,
+            )
+            self._persist_llm_advice(step, advice, advice_used)
+            self._persist_llm_convergence(step, explicit_convergence_advice, used=True)
+            return action
+
+        require_llm_convergence = False
+        llm_cfg = getattr(self.config, "llm", None)
+        if llm_cfg is not None:
+            require_llm_convergence = bool(getattr(llm_cfg, "convergence_require_llm", False))
+        # If LLM convergence is required, heuristic stop policy is fully disabled.
+        # If LLM convergence is optional, only use heuristic policy when LLM gave no convergence decision.
+        allow_policy_stop = (llm_convergence is None) and (not require_llm_convergence)
+        if allow_policy_stop:
+            stop_decision = self.stop_policy.evaluate(state, step)
+        else:
+            stop_decision = None
         if stop_decision is not None:
             action = StopAction(kind="stop", reason=stop_decision.reason)
             decision["action"] = "stop"
             decision.update(stop_decision.details)
             self._persist(decision, step)
             if self.run_context:
+                stop_claims = self._claims_with_refs(
+                    [stop_decision.reason],
+                    self._default_reason_refs(step, advice=decision_advice),
+                )
                 write_json(
                     artifact_path(self.run_context, "steps", f"step_{step}_stop_decision.json"),
                     {
                         "schema_version": "1.0",
                         "reason": stop_decision.reason,
-                        "claims": [{"claim": stop_decision.reason, "refs": []}],
+                        "claims": stop_claims,
                     },
                 )
+                stop_refs = self._default_reason_refs(step, advice=decision_advice)
                 self.trace.event(
                     run_id=self.run_context.run_id,
                     phase="online",
@@ -144,11 +306,30 @@ class TuningAnalyzer:
                     actor="agent",
                     type="stop.decision",
                     payload={"reason": stop_decision.reason},
+                    refs=stop_refs,
                 )
-            self._write_decision_record(step, action, state, why_selected=[stop_decision.reason], why_rejected=[])
+            self._write_decision_record(
+                step,
+                action,
+                state,
+                why_selected=[stop_decision.reason],
+                why_rejected=[],
+                advice=decision_advice,
+            )
+            self._persist_llm_advice(step, advice, advice_used)
+            self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
             return action
 
-        use_hypothesis = (step % self.config.budget.hypothesis_every) == 0
+        default_use_hypothesis = (step % self.config.budget.hypothesis_every) == 0
+        use_hypothesis, lane_source = self._choose_action_lane(
+            action_preference=action_preference,
+            advice=decision_advice,
+            default_use_hypothesis=default_use_hypothesis,
+            llm_requested=llm_requested,
+        )
+        decision["lane_source"] = lane_source
+        if lane_source.startswith("llm_") and lane_source != "llm_pending_hide_latency" and decision_advice is not None:
+            advice_used = True
 
         base_config = base_config or (state.best_record.action.config if state.best_record else None)
 
@@ -156,6 +337,11 @@ class TuningAnalyzer:
             portfolio = self.hypothesis_generator.propose_portfolio(
                 plan, context, base_config, last_metrics, max_hypotheses=3
             )
+            if decision_advice:
+                advice_hypotheses = self._hypotheses_from_advice(decision_advice.output)
+                if advice_hypotheses:
+                    portfolio.extend(advice_hypotheses)
+                    advice_used = True
             scored = []
             for hyp in portfolio:
                 merged = dict(base_config.params if base_config else {})
@@ -187,7 +373,37 @@ class TuningAnalyzer:
                 by_id = {hyp.id: hyp for hyp in portfolio}
                 best_id = ranked[0]["hypothesis"]["id"]
                 hypothesis = by_id.get(best_id, portfolio[0])
+            selected_pred = None
+            selected_uncertainty = None
+            if ranked:
+                top = ranked[0]
+                selected_pred = top.get("predicted_time_ms")
+                selected_uncertainty = top.get("uncertainty")
+            why_selected = [self._selected_hypothesis_reason(hypothesis, selected_pred, selected_uncertainty)]
+            why_rejected = self._rejected_hypothesis_reasons(ranked, chosen_id=hypothesis.id)
             if self.run_context:
+                series_payload = {
+                    "schema_version": "1.0",
+                    "step": step,
+                    "chosen_id": hypothesis.id,
+                    "chosen_reason": why_selected[0],
+                    "series": [
+                        {
+                            "rank": rank,
+                            "id": item.get("hypothesis", {}).get("id"),
+                            "summary": item.get("hypothesis", {}).get("summary"),
+                            "mechanism": item.get("hypothesis", {}).get("mechanism"),
+                            "patch": item.get("hypothesis", {}).get("patch"),
+                            "predicted_time_ms": item.get("predicted_time_ms"),
+                            "uncertainty": item.get("uncertainty"),
+                        }
+                        for rank, item in enumerate(ranked, start=1)
+                    ],
+                }
+                write_json(
+                    artifact_path(self.run_context, "steps", f"step_{step}_hypothesis_series.json"),
+                    series_payload,
+                )
                 write_json(
                     artifact_path(self.run_context, "steps", f"step_{step}_hypothesis_portfolio.json"),
                     scored,
@@ -259,7 +475,10 @@ class TuningAnalyzer:
                     state,
                     why_selected=["risk_too_high_fallback"],
                     why_rejected=["hypothesis_risk_too_high"],
+                    advice=decision_advice,
                 )
+                self._persist_llm_advice(step, advice, advice_used)
+                self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
                 return action
             action = HypothesisAction(
                 kind="hypothesis",
@@ -273,11 +492,24 @@ class TuningAnalyzer:
             decision["hypothesis"] = asdict(hypothesis)
             decision["compiled"] = {"warnings": compiled.warnings, "risk_score": compiled.risk_score}
             self._persist(decision, step)
-            self._write_decision_record(step, action, state, why_selected=[hypothesis.summary], why_rejected=[])
+            self._write_decision_record(
+                step,
+                action,
+                state,
+                why_selected=why_selected,
+                why_rejected=why_rejected,
+                advice=decision_advice,
+            )
+            self._persist_llm_advice(step, advice, advice_used)
+            self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
             return action
 
+        guidance = None
+        if decision_advice and isinstance(decision_advice.output, dict) and decision_advice.output.get("numeric_guidance"):
+            guidance = decision_advice.output.get("numeric_guidance")
+            advice_used = True
         config, search_result = self.numeric_manager.propose(
-            plan, state, workload, base_config, step, context=context
+            plan, state, workload, base_config, step, context=context, guidance=guidance
         )
         candidate_payload = [
             {
@@ -298,7 +530,16 @@ class TuningAnalyzer:
         decision["action"] = "numeric"
         decision["candidates"] = candidate_payload
         self._persist(decision, step)
-        self._write_decision_record(step, action, state, why_selected=["numeric_search"], why_rejected=[])
+        self._write_decision_record(
+            step,
+            action,
+            state,
+            why_selected=["numeric_search"],
+            why_rejected=[],
+            advice=decision_advice,
+        )
+        self._persist_llm_advice(step, advice, advice_used)
+        self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
         return action
 
     def _persist(self, decision: dict, step: int) -> None:
@@ -316,31 +557,616 @@ class TuningAnalyzer:
         improvement = (worst - best) / worst
         return improvement < self.config.budget.plateau_eps
 
-    def _write_decision_record(self, step: int, action: Any, state: Any, why_selected: list, why_rejected: list) -> None:
+    def _write_decision_record(
+        self,
+        step: int,
+        action: Any,
+        state: Any,
+        why_selected: list,
+        why_rejected: list,
+        advice: Any | None = None,
+    ) -> None:
         if not self.run_context:
             return
+        reason_refs = self._default_reason_refs(step, advice=advice)
+        selected_claims = self._claims_with_refs(why_selected, reason_refs)
+        rejected_claims = self._claims_with_refs(why_rejected, reason_refs)
+        chosen_action = {
+            "kind": getattr(action, "kind", None),
+            "rationale": getattr(action, "rationale", None),
+        }
+        candidates_considered = self._candidate_records_for_action(step, action, reason_refs)
+        counterfactuals = self._build_counterfactuals(candidates_considered)
+        budget_remaining = None
+        try:
+            budget_remaining = int(self.config.budget.max_steps) - int(step) - 1
+        except Exception:
+            budget_remaining = None
+        constraints_snapshot = {
+            "risk_max": getattr(self.config.safety, "max_risk_score", None),
+            "sla_max_iteration_time": getattr(self.config, "sla_max_iteration_time", None),
+            "budget_remaining_steps": budget_remaining,
+        }
+        context_ref = f"steps/step_{step}_context_pack.json"
+        rollback_plan = {
+            "last_known_good": state.last_known_good.params if state.last_known_good else None,
+            "last_known_good_ref": f"metric:{max(step - 1, 0)}:primary",
+        }
         record = {
             "schema_version": "1.0",
             "step": step,
-            "chosen_action": {
-                "kind": getattr(action, "kind", None),
-                "rationale": getattr(action, "rationale", None),
-            },
-            "candidates_considered": [],
-            "why_selected": [{"claim": item, "refs": []} for item in why_selected],
-            "why_rejected": [{"claim": item, "refs": []} for item in why_rejected],
+            "context_ref": context_ref,
+            "chosen_action": chosen_action,
+            "candidates_considered": candidates_considered,
+            "why_selected": selected_claims,
+            "why_rejected": rejected_claims,
             "expected_outcome": {},
             "success_criteria": {"metric": "iteration_time_ms", "direction": "decrease"},
-            "rollback_plan": {
-                "last_known_good": state.last_known_good.params if state.last_known_good else None
-            },
+            "rollback_plan": rollback_plan,
         }
         write_json(artifact_path(self.run_context, "steps", f"step_{step}_decision_record.json"), record)
+
+        call_chain = list(reason_refs)
+        selected_ref = next(
+            (
+                item.get("candidate_ref")
+                for item in candidates_considered
+                if isinstance(item, dict) and item.get("status") == "selected"
+            ),
+            None,
+        )
+        if selected_ref:
+            call_chain.append(str(selected_ref))
+        bundle = build_decision_bundle(
+            step=step,
+            chosen_action=chosen_action,
+            why_selected=selected_claims,
+            why_rejected=rejected_claims,
+            context_ref=context_ref,
+            constraints_snapshot=constraints_snapshot,
+            rollback_plan=rollback_plan,
+            refs_fallback=reason_refs,
+            candidates_considered=candidates_considered,
+            counterfactuals=counterfactuals,
+            call_chain=call_chain,
+        )
+        bundle_errors = validate_decision_bundle(bundle)
+        if bundle_errors:
+            bundle["quality_flags"] = sorted(set(bundle.get("quality_flags", []) + bundle_errors))
+        bundle_rel_path = f"steps/step_{step}_decision_bundle.json"
+        write_json(
+            artifact_path(self.run_context, "steps", f"step_{step}_decision_bundle.json"),
+            bundle,
+        )
         self.trace.event(
             run_id=self.run_context.run_id,
             phase="online",
             step=step,
             actor="agent",
             type="decision.select_action",
-            payload={"action": record["chosen_action"]},
+            payload={
+                "action": record["chosen_action"],
+                "decision_bundle_path": bundle_rel_path,
+                "chosen_candidate_ref": selected_ref,
+            },
+            refs=reason_refs,
+            quality_flags=bundle.get("quality_flags", []),
         )
+
+    def _is_decision_eligible_advice(self, advice: Any) -> bool:
+        if advice is None:
+            return False
+        explicit = getattr(advice, "decision_eligible", None)
+        if explicit is not None:
+            return bool(explicit)
+        output = getattr(advice, "output", None)
+        parse_errors = getattr(advice, "parse_errors", [])
+        return isinstance(output, dict) and bool(output) and not parse_errors
+
+    def _default_reason_refs(self, step: int, advice: Any | None = None) -> list[str]:
+        refs = [f"metric:{max(step - 1, 0)}:primary", f"steps/step_{step}_context_pack.json"]
+        call_id = getattr(advice, "call_id", None) if advice is not None else None
+        if call_id:
+            refs.append(f"llm:call_{call_id}")
+        return refs
+
+    def _claims_with_refs(self, claims: list[Any], default_refs: list[str]) -> list[dict]:
+        out: list[dict] = []
+        for item in claims:
+            if isinstance(item, dict):
+                claim_text = str(item.get("claim", "")).strip()
+                refs = item.get("refs") if isinstance(item.get("refs"), list) else []
+                confidence = item.get("confidence", 0.7)
+            else:
+                claim_text = str(item).strip()
+                refs = []
+                confidence = 0.7
+            if not claim_text:
+                continue
+            out.append(
+                {
+                    "claim": claim_text,
+                    "refs": refs or list(default_refs),
+                    "confidence": self._safe_float(confidence) if self._safe_float(confidence) is not None else 0.7,
+                }
+            )
+        if out:
+            return out
+        return [{"claim": "no_explicit_claim", "refs": list(default_refs), "confidence": 0.5}]
+
+    def _candidate_records_for_action(self, step: int, action: Any, default_refs: list[str]) -> list[dict]:
+        kind = str(getattr(action, "kind", "") or "")
+        records: list[dict] = []
+        if kind == "numeric":
+            search = getattr(action, "search", None)
+            candidates = getattr(search, "candidates", None) if search is not None else None
+            if isinstance(candidates, list):
+                selected_idx = 0
+                action_config = getattr(getattr(action, "config", None), "params", None)
+                if isinstance(action_config, dict):
+                    for idx, candidate in enumerate(candidates):
+                        cand_cfg = getattr(getattr(candidate, "config", None), "params", None)
+                        if isinstance(cand_cfg, dict) and cand_cfg == action_config:
+                            selected_idx = idx
+                            break
+                for idx, candidate in enumerate(candidates):
+                    pred = getattr(candidate, "predicted_time_ms", None)
+                    unc = getattr(candidate, "uncertainty", None)
+                    records.append(
+                        {
+                            "candidate_ref": f"candidate:{step}:{idx}",
+                            "score_breakdown": {
+                                "pred_time_ms": self._safe_float(pred),
+                                "uncertainty": self._safe_float(unc),
+                                "risk_score": None,
+                                "feasibility": 1.0,
+                                "final_rank_score": None,
+                            },
+                            "status": "selected" if idx == selected_idx else "rejected",
+                            "reject_reason": "" if idx == selected_idx else "dominated",
+                            "refs": list(default_refs),
+                        }
+                    )
+        elif kind == "hypothesis":
+            compiled = getattr(action, "compiled", None)
+            risk_score = getattr(compiled, "risk_score", None) if compiled is not None else None
+            records.append(
+                {
+                    "candidate_ref": f"candidate:{step}:hypothesis",
+                    "score_breakdown": {
+                        "pred_time_ms": None,
+                        "uncertainty": None,
+                        "risk_score": self._safe_float(risk_score),
+                        "feasibility": 1.0,
+                        "final_rank_score": None,
+                    },
+                    "status": "selected",
+                    "reject_reason": "",
+                    "refs": list(default_refs),
+                }
+            )
+        elif kind in ("stop", "rollback"):
+            records.append(
+                {
+                    "candidate_ref": f"candidate:{step}:{kind}",
+                    "score_breakdown": {
+                        "pred_time_ms": None,
+                        "uncertainty": None,
+                        "risk_score": None,
+                        "feasibility": 1.0,
+                        "final_rank_score": None,
+                    },
+                    "status": "selected",
+                    "reject_reason": "",
+                    "refs": list(default_refs),
+                }
+            )
+        return records
+
+    def _build_counterfactuals(self, candidates_considered: list[dict]) -> list[dict]:
+        selected_pred = None
+        selected_risk = None
+        rejected: list[dict] = []
+        for item in candidates_considered:
+            score = item.get("score_breakdown", {}) if isinstance(item.get("score_breakdown"), dict) else {}
+            if item.get("status") == "selected":
+                selected_pred = self._safe_float(score.get("pred_time_ms"))
+                selected_risk = self._safe_float(score.get("risk_score"),) or 0.0
+            else:
+                rejected.append(item)
+        out: list[dict] = []
+        for item in rejected[:2]:
+            score = item.get("score_breakdown", {}) if isinstance(item.get("score_breakdown"), dict) else {}
+            pred = self._safe_float(score.get("pred_time_ms"))
+            risk = self._safe_float(score.get("risk_score")) or 0.0
+            expected_delta_ms = None
+            if pred is not None and selected_pred is not None:
+                expected_delta_ms = pred - selected_pred
+            risk_delta = risk - selected_risk if selected_risk is not None else None
+            out.append(
+                {
+                    "candidate_ref": item.get("candidate_ref"),
+                    "expected_delta_ms": expected_delta_ms,
+                    "risk_delta": risk_delta,
+                    "why_not": item.get("reject_reason") or "dominated",
+                }
+            )
+        return out
+
+    def _extract_refs_from_claims(self, claims: Any) -> list[str]:
+        refs: list[str] = []
+        if not isinstance(claims, list):
+            return refs
+        for item in claims:
+            if not isinstance(item, dict):
+                continue
+            claim_refs = item.get("refs")
+            if not isinstance(claim_refs, list):
+                continue
+            for ref in claim_refs:
+                text = str(ref)
+                if text and text not in refs:
+                    refs.append(text)
+        return refs
+
+    def _should_request_llm_advice(self, step: int, state: Any, last_metrics: Any) -> bool:
+        llm_cfg = getattr(self.config, "llm", None)
+        if llm_cfg is None or not getattr(llm_cfg, "online_enabled", False):
+            return False
+        triggers = set(getattr(llm_cfg, "online_triggers", ["always"]) or ["always"])
+        if "always" in triggers:
+            return True
+        if "plateau" in triggers and state.should_stop:
+            return True
+        if "failure" in triggers and last_metrics and not last_metrics.success:
+            return True
+        return False
+
+    def _hypotheses_from_advice(self, advice: Dict[str, Any]) -> list[Hypothesis]:
+        if not isinstance(advice, dict):
+            return []
+        hypotheses = []
+        for item in advice.get("hypotheses", []):
+            if not isinstance(item, dict):
+                continue
+            patch = item.get("patch", {}) if isinstance(item.get("patch"), dict) else {}
+            if not patch:
+                continue
+            summary = str(item.get("summary", "")).strip()
+            reason_claims = item.get("reason_claims") if isinstance(item.get("reason_claims"), list) else []
+            if self._is_generic_summary(summary):
+                summary = self._build_specific_summary_from_patch(
+                    patch=patch,
+                    mechanism=item.get("mechanism"),
+                    reason_claims=reason_claims,
+                )
+            hypotheses.append(
+                Hypothesis(
+                    id=item.get("id", "llm_hypothesis"),
+                    summary=summary or self._build_specific_summary_from_patch(patch=patch, mechanism=item.get("mechanism"), reason_claims=reason_claims),
+                    patch=patch,
+                    mechanism=item.get("mechanism"),
+                    expected_effect=item.get("expected_effect", {}),
+                    risk=str(item.get("risk", {}).get("level", "low")),
+                    evidence={"refs": item.get("evidence_refs", []), "reason_claims": reason_claims},
+                    test_plan={"success_criteria": item.get("success_criteria", "")},
+                )
+            )
+        return hypotheses
+
+    def _persist_llm_advice(self, step: int, advice: Any, used: bool) -> None:
+        if not self.run_context or advice is None:
+            return
+        parse_errors = getattr(advice, "parse_errors", [])
+        raw_is_valid_json = bool(getattr(advice, "raw_is_valid_json", False))
+        schema_passed = bool(getattr(advice, "schema_passed", False))
+        decision_eligible = self._is_decision_eligible_advice(advice)
+        payload = {
+            "schema_version": "1.0",
+            "step": step,
+            "advice_step": getattr(advice, "step", step),
+            "call_id": getattr(advice, "call_id", None),
+            "used_in_decision": bool(used),
+            "output": getattr(advice, "output", {}),
+            "parse_errors": parse_errors,
+            "raw_is_valid_json": raw_is_valid_json,
+            "schema_passed": schema_passed,
+            "decision_eligible": decision_eligible,
+            "raw_text": getattr(advice, "raw_text", ""),
+        }
+        write_json(artifact_path(self.run_context, "steps", f"step_{step}_llm_decision_support.json"), payload)
+        self.trace.event(
+            run_id=self.run_context.run_id,
+            phase="online",
+            step=step,
+            actor="llm",
+            type="llm.advice",
+            payload={
+                "call_id": payload["call_id"],
+                "used": payload["used_in_decision"],
+                "decision_eligible": payload["decision_eligible"],
+                "raw_is_valid_json": payload["raw_is_valid_json"],
+                "schema_passed": payload["schema_passed"],
+            },
+            refs=[f"llm:call_{payload['call_id']}"] if payload.get("call_id") else [],
+        )
+
+    def _persist_late_llm_advice(self, advice: Any) -> None:
+        if not self.run_context or advice is None:
+            return
+        parse_errors = getattr(advice, "parse_errors", [])
+        raw_is_valid_json = bool(getattr(advice, "raw_is_valid_json", False))
+        schema_passed = bool(getattr(advice, "schema_passed", False))
+        decision_eligible = self._is_decision_eligible_advice(advice)
+        payload = {
+            "schema_version": "1.0",
+            "step": getattr(advice, "step", None),
+            "call_id": getattr(advice, "call_id", None),
+            "output": getattr(advice, "output", {}),
+            "parse_errors": parse_errors,
+            "raw_is_valid_json": raw_is_valid_json,
+            "schema_passed": schema_passed,
+            "decision_eligible": decision_eligible,
+            "raw_text": getattr(advice, "raw_text", ""),
+        }
+        write_json(
+            artifact_path(self.run_context, "online", f"llm_advice_step_{payload['step']}.json"),
+            payload,
+        )
+
+    def _evaluate_tool_request(self, advice: Any) -> dict | None:
+        if not self._is_decision_eligible_advice(advice):
+            return None
+        if advice is None or not isinstance(advice.output, dict):
+            return None
+        tool_request = advice.output.get("tool_request") or {}
+        name = tool_request.get("name", "none")
+        allowed = {"none", "nccltest.short", "workload.short", "microbench.reduced"}
+        accepted = name in allowed and name != "none"
+        return {
+            "name": name,
+            "accepted": accepted,
+            "reason": tool_request.get("reason", ""),
+        }
+
+    def _action_preference_from_advice(self, advice: Any) -> str | None:
+        if not self._is_decision_eligible_advice(advice):
+            return None
+        if advice is None or not isinstance(advice.output, dict):
+            return None
+        pref = advice.output.get("action_preference")
+        if pref in ("auto", "hypothesis", "numeric"):
+            return str(pref)
+        recommended = advice.output.get("recommended_action")
+        if isinstance(recommended, dict):
+            kind = str(recommended.get("kind", "")).strip().lower()
+            if kind == "hypothesis":
+                return "hypothesis"
+            if kind in ("numeric", "measure"):
+                return "numeric"
+        return None
+
+    def _choose_action_lane(
+        self,
+        *,
+        action_preference: str | None,
+        advice: Any,
+        default_use_hypothesis: bool,
+        llm_requested: bool,
+    ) -> tuple[bool, str]:
+        if action_preference == "hypothesis":
+            return True, "llm_action_preference"
+        if action_preference == "numeric":
+            return False, "llm_action_preference"
+
+        output = advice.output if advice is not None and isinstance(getattr(advice, "output", None), dict) else {}
+        if output:
+            recommended = output.get("recommended_action")
+            if isinstance(recommended, dict):
+                kind = str(recommended.get("kind", "")).strip().lower()
+                if kind == "hypothesis":
+                    return True, "llm_recommended_action"
+                if kind in ("numeric", "measure"):
+                    return False, "llm_recommended_action"
+
+            hypotheses = output.get("hypotheses")
+            if isinstance(hypotheses, list) and hypotheses:
+                return True, "llm_hypothesis_portfolio"
+
+            numeric_guidance = output.get("numeric_guidance")
+            if isinstance(numeric_guidance, dict) and numeric_guidance:
+                return False, "llm_numeric_guidance"
+
+        if llm_requested and advice is None:
+            return False, "llm_pending_hide_latency"
+        return default_use_hypothesis, "schedule_fallback"
+
+    def _is_generic_summary(self, summary: str) -> bool:
+        text = " ".join(str(summary or "").lower().split())
+        if not text:
+            return True
+        generic_markers = (
+            "apply memory rule",
+            "memory rule",
+            "llm hypothesis",
+            "generic optimization",
+            "tune params",
+            "tune parameters",
+            "adjust config",
+        )
+        if text in generic_markers:
+            return True
+        if "memory rule" in text and len(text) < 80:
+            return True
+        return False
+
+    def _build_specific_summary_from_patch(
+        self,
+        *,
+        patch: Dict[str, Any],
+        mechanism: Any,
+        reason_claims: list[Any],
+    ) -> str:
+        if isinstance(reason_claims, list):
+            for item in reason_claims:
+                if isinstance(item, dict):
+                    claim = str(item.get("claim", "")).strip()
+                    if claim:
+                        return claim
+                elif isinstance(item, str) and item.strip():
+                    return item.strip()
+        parts = [f"{k}={v}" for k, v in list((patch or {}).items())[:4]]
+        if not parts:
+            return "targeted hypothesis derived from online evidence"
+        mech = str(mechanism or "").strip()
+        mech_text = f"{mech}: " if mech else ""
+        return f"{mech_text}adjust {'; '.join(parts)} to test measured communication bottleneck"
+
+    def _selected_hypothesis_reason(
+        self,
+        hypothesis: Hypothesis,
+        predicted_time_ms: Any,
+        uncertainty: Any,
+    ) -> str:
+        summary = str(getattr(hypothesis, "summary", "") or "selected hypothesis").strip()
+        pred = self._safe_float(predicted_time_ms)
+        unc = self._safe_float(uncertainty)
+        if pred is None:
+            return summary
+        if unc is None:
+            return f"{summary} | predicted_time_ms={pred:.2f}"
+        return f"{summary} | predicted_time_ms={pred:.2f} (uncertainty={unc:.3f})"
+
+    def _rejected_hypothesis_reasons(self, ranked: list[Dict[str, Any]], *, chosen_id: str) -> list[str]:
+        reasons: list[str] = []
+        for item in ranked:
+            hyp = item.get("hypothesis", {}) if isinstance(item.get("hypothesis"), dict) else {}
+            hyp_id = str(hyp.get("id", ""))
+            if not hyp_id or hyp_id == chosen_id:
+                continue
+            summary = str(hyp.get("summary", "alternative hypothesis")).strip()
+            pred = self._safe_float(item.get("predicted_time_ms"))
+            if pred is None:
+                reasons.append(f"{hyp_id} not selected: {summary}")
+            else:
+                reasons.append(f"{hyp_id} not selected: {summary} (predicted_time_ms={pred:.2f})")
+            if len(reasons) >= 3:
+                break
+        return reasons
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _convergence_from_advice(self, advice: Any) -> dict | None:
+        if not self._is_decision_eligible_advice(advice):
+            return None
+        if advice is None or not isinstance(advice.output, dict):
+            return None
+        if not self._llm_convergence_enabled():
+            return None
+        llm_cfg = getattr(self.config, "llm", None)
+        convergence = advice.output.get("convergence")
+        if not isinstance(convergence, dict):
+            return None
+        decision = convergence.get("decision")
+        if decision not in ("continue", "stop"):
+            return None
+        confidence_raw = convergence.get("confidence", 0.0)
+        try:
+            confidence = float(confidence_raw)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        min_conf = float(getattr(llm_cfg, "convergence_min_confidence", 0.55)) if llm_cfg is not None else 0.55
+        if confidence < min_conf:
+            return None
+        claims = convergence.get("claims") if isinstance(convergence.get("claims"), list) else []
+        return {
+            "decision": decision,
+            "reason": convergence.get("reason", ""),
+            "confidence": confidence,
+            "claims": claims,
+        }
+
+    def _llm_convergence_enabled(self) -> bool:
+        llm_cfg = getattr(self.config, "llm", None)
+        if llm_cfg is None:
+            return True
+        return bool(getattr(llm_cfg, "convergence_enabled", True))
+
+    def _request_explicit_convergence(
+        self,
+        *,
+        step: int,
+        state: Any,
+        last_metrics: Any,
+        context_pack: Dict[str, Any] | None,
+        recent_history: Dict[str, Any] | None,
+    ) -> Any | None:
+        if self.llm_advisor is None:
+            return None
+        if context_pack is None:
+            context_pack = {
+                "schema_version": "1.0",
+                "phase": "online",
+                "step": step,
+                "observations": {
+                    "last_success": getattr(last_metrics, "success", True) if last_metrics is not None else True,
+                    "plateau_count": getattr(state, "plateau_count", 0),
+                },
+            }
+        if recent_history is None:
+            recent_history = {
+                "steps": [
+                    {
+                        "step": rec.step,
+                        "iteration_time_ms": rec.metrics.iteration_time_ms,
+                        "success": rec.metrics.success,
+                    }
+                    for rec in state.history[-5:]
+                ],
+                "best_ms": state.best_record.metrics.iteration_time_ms if state.best_record else None,
+                "plateau_count": state.plateau_count,
+            }
+        policy_hints = {
+            "plateau": bool(getattr(state, "should_stop", False)),
+            "patience": self.config.budget.patience,
+            "max_steps": self.config.budget.max_steps,
+            "current_step": step,
+            "last_success": getattr(last_metrics, "success", True) if last_metrics is not None else True,
+        }
+        try:
+            return self.llm_advisor.decide_convergence(
+                step=step,
+                context_pack=context_pack,
+                recent_history=recent_history,
+                policy_hints=policy_hints,
+            )
+        except Exception:
+            return None
+
+    def _persist_llm_convergence(self, step: int, advice: Any, used: bool) -> None:
+        if not self.run_context or advice is None:
+            return
+        parse_errors = getattr(advice, "parse_errors", [])
+        raw_is_valid_json = bool(getattr(advice, "raw_is_valid_json", False))
+        schema_passed = bool(getattr(advice, "schema_passed", False))
+        decision_eligible = self._is_decision_eligible_advice(advice)
+        payload = {
+            "schema_version": "1.0",
+            "step": step,
+            "advice_step": getattr(advice, "step", step),
+            "call_id": getattr(advice, "call_id", None),
+            "used_in_decision": bool(used),
+            "output": getattr(advice, "output", {}),
+            "parse_errors": parse_errors,
+            "raw_is_valid_json": raw_is_valid_json,
+            "schema_passed": schema_passed,
+            "decision_eligible": decision_eligible,
+            "raw_text": getattr(advice, "raw_text", ""),
+        }
+        write_json(artifact_path(self.run_context, "steps", f"step_{step}_llm_convergence.json"), payload)

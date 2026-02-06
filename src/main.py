@@ -36,6 +36,17 @@ from .trace import TraceEmitterWriter, TraceWriter
 logger = setup_logger("cclagent.cli")
 
 
+def _default_workload() -> WorkloadSpec:
+    candidates = [
+        "workload/benchmarks/llama3.1-8b-agentic-showcase.json",
+        "workload/benchmarks/llama3.1-8b.json",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return load_workload_spec(path)
+    return WorkloadSpec(name="demo", command=[])
+
+
 def build_tools(config, run_context: RunContext, dry_run: bool, simulate_workload: bool = False) -> ToolSuite:
     metrics = MetricsCollector(config.metrics, run_context=run_context)
     microbench = MicrobenchRunner(
@@ -117,7 +128,7 @@ def main() -> None:
         agent_config.artifacts_root = args.artifacts_root
     if args.seed is not None:
         agent_config.seed = args.seed
-    workload = load_workload_spec(args.workload) if args.workload else WorkloadSpec(name="demo", command=[])
+    workload = load_workload_spec(args.workload) if args.workload else _default_workload()
 
     run_context = create_run_context(agent_config.artifacts_root, dry_run=args.dry_run, seed=agent_config.seed)
     if "CCL_LLM_TRACE_DIR" not in os.environ:

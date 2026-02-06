@@ -257,6 +257,10 @@ class InitialConfigPlan:
     important_params: List[ImportantParam] = field(default_factory=list)
     candidate_subspaces: List[Subspace] = field(default_factory=list)
     recommended_search_params: List[str] = field(default_factory=list)
+    warm_start_program: Dict[str, Any] = field(default_factory=dict)
+    hypothesis_playbook: List[Dict[str, Any]] = field(default_factory=list)
+    pruning_guidance: List[Dict[str, Any]] = field(default_factory=list)
+    subspace_priors: List[Dict[str, Any]] = field(default_factory=list)
     notes: str = ""
 
 
@@ -417,12 +421,35 @@ class ExecutionConfig:
 @dataclass
 class LLMSettings:
     provider: str = "ollama"
-    model: str = "deepseek-r1:8b"
+    model: str = "qwen3:0.6b"
     max_context_tokens: int = 8000
     max_response_tokens: int = 512
     temperature: float = 0.2
-    system_prompt_version: str = "offline_v1"
+    system_prompt_version: str = "offline_v1"  # legacy default
+    system_prompt_version_offline: str = "offline_strategic_plan_v2"
+    system_prompt_version_online: str = "online_decision_support_v1"
+    system_prompt_version_postrun: str = "postrun_distill_rules_v2"
+    online_enabled: bool = True
+    online_call_every_steps: int = 1
+    online_soft_wait_s: float = 2.0
+    online_hard_timeout_s: int = 15
+    online_triggers: List[str] = field(
+        default_factory=lambda: ["always", "plateau", "bottleneck_flip", "high_uncertainty", "failure"]
+    )
+    convergence_enabled: bool = True
+    convergence_min_confidence: float = 0.55
+    convergence_require_llm: bool = False
     allow_fallback: bool = True
+
+
+@dataclass
+class WarmStartSettings:
+    mode: str = "series"  # single | series
+    max_candidates: int = 3
+    eval_steps: int = 50
+    eval_timeout_sec: int = 300
+    concurrency: int = 1
+    counts_toward_budget: bool = False
 
 
 @dataclass
@@ -442,6 +469,7 @@ class AgentConfig:
     memory: MemoryConfig
     rag: RagConfig
     llm: LLMSettings
+    warm_start: WarmStartSettings
     microbench: MicrobenchSettings
     metrics: MetricsConfig
     numeric_search: NumericSearchSettings

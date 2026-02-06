@@ -28,6 +28,7 @@ Phases
 ------
 1) Offline planning (cheap thinking)
 - Run microbenchmarks / primitive profiling to prune the search space.
+- Run system probes (`hostname`, `nvidia-smi`, `ibstat`) with simulation fallback in dry-run.
 - Retrieve rules, constraints, and heuristics (RAG) to propose valid configs.
 - Produce an initial configuration plan before running the real workload.
 
@@ -36,7 +37,7 @@ Phases
 - Plan and apply next actions using two complementary modes:
   - hypothesis steps: knowledge-guided, explainable changes
   - numeric steps: budgeted search in the pruned subspace (surrogate-guided search)
-- Stop when improvements plateau and lock the best config.
+- Ask the online LLM for decision support every step, including convergence (`continue/stop`) under confidence thresholds.
 
 3) Post-run updating (make today cheaper tomorrow)
 - Distill traces into reusable rules and insights.
@@ -61,7 +62,29 @@ Tech stack (design goals)
 Default behavior
 ----------------
 - The agent **always attempts an LLM call**, even in dry-run.
-- Default provider/model: **Ollama** / `deepseek-r1:8b` (override with `--provider` / `--model` or config).
+- Use `--provider` / `--model` or config `llm.provider` / `llm.model` to select runtime model.
+
+Agentic Showcase (Kimi on Fireworks)
+------------------------------------
+Run the full offline->online->postrun white-box pipeline with simulated workload and clean artifacts:
+
+```bash
+bash scripts/run_agentic_showcase_kimi.sh
+```
+
+Equivalent explicit command:
+
+```bash
+rm -rf artifacts/*
+python3 -m src.runner \
+  --mode live \
+  --config configs/agentic_showcase_kimi.json \
+  --workload workload/benchmarks/llama3.1-8b-agentic-showcase.json \
+  --provider fireworks \
+  --model accounts/fireworks/models/kimi-k2p5 \
+  --dry-run \
+  --simulate-workload
+```
 
 TUI dashboard
 -------------
@@ -74,6 +97,7 @@ python3 scripts/agent_tui.py --run-dir artifacts/<run_id>
 Notes:
 - If you don’t have the UI deps yet: `pip install textual rich`
 - The dashboard’s interactive chat defaults to **Ollama** / `deepseek-r1:8b` (override with `--provider` / `--model`).
+- Right pane includes `Pruning Lens` (offline+online pruning evidence) and `LLM Reasoning` (offline->online->postrun reasoning timeline).
 
 Repository layout
 -----------------

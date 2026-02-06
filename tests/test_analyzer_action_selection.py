@@ -1,7 +1,7 @@
 import unittest
 
 from src.agent.analyzer import TuningAnalyzer
-from src.types import AgentConfig, ExecutionConfig, LLMSettings, MemoryConfig, MetricsConfig, MicrobenchSettings, NumericSearchSettings, RagConfig, SafetyConfig, SurrogateConfig, TuningBudget
+from src.types import AgentConfig, ExecutionConfig, LLMSettings, MemoryConfig, MetricsConfig, MicrobenchSettings, NumericSearchSettings, RagConfig, SafetyConfig, SurrogateConfig, TuningBudget, WarmStartSettings
 from src.types import ParameterSpace, ParameterSpec, ContextSignature, Metrics, NCCLConfig
 
 
@@ -10,9 +10,12 @@ class DummyHypothesis:
         from src.types import Hypothesis
         return Hypothesis(id="h", summary="test", patch={"NCCL_ALGO": "RING"})
 
+    def propose_portfolio(self, plan, context, base_config, last_metrics, max_hypotheses=3):
+        return [self.propose(plan, context, base_config, last_metrics)]
+
 
 class DummyNumeric:
-    def propose(self, plan, state, workload, base_config, step):
+    def propose(self, plan, state, workload, base_config, step, context=None, guidance=None):
         from src.types import SearchCandidate, SearchResult
         cfg = NCCLConfig(params=base_config.params)
         candidate = SearchCandidate(config=cfg, predicted_time_ms=1.0, rationale="dummy")
@@ -36,6 +39,7 @@ class AnalyzerSelectionTest(unittest.TestCase):
             memory=MemoryConfig(),
             rag=RagConfig(),
             llm=LLMSettings(),
+            warm_start=WarmStartSettings(),
             microbench=MicrobenchSettings(),
             metrics=MetricsConfig(),
             numeric_search=NumericSearchSettings(),
