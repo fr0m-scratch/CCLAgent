@@ -37,6 +37,17 @@ from .planner import OfflinePlanner
 from .policy import DecisionPolicy
 from .state import TuningState
 from .metrics_derive import derive_metrics
+from ..memory.seed import inject_seed_rules
+from ..safety.risk import RiskBudgetState
+from ..models.calibration import build_interpretation
+from .hypothesis_tracker import (
+    HypothesisPrediction, HypothesisVerdict, HypothesisScorecard,
+    make_prediction, compute_verdict, build_scorecard,
+)
+from .llm_influence import LLMInfluenceRecord, record_influence, build_influence_summary
+from .attribution import build_attribution_report
+from .convergence_argument import compute_convergence_evidence
+from .narrative import generate_narrative
 from .bottleneck import classify_bottleneck
 from .context_pack import build_context_pack, write_context_pack
 from .warmstart import run_warm_start_program
@@ -122,6 +133,7 @@ class CCLAgent:
             trace=self.trace,
             memory=self.memory,
             llm_advisor=self.llm_advisor,
+            rag=self.rag,
         )
         self._mailbox_async_enabled = False
         self._mailbox_worker_stop = threading.Event()
@@ -140,6 +152,7 @@ class CCLAgent:
                 "seed": self.config.seed,
             },
         )
+        inject_seed_rules(self.memory)
         probe = self.system_probe.collect(
             workload,
             simulate=bool(getattr(self.run_context, "dry_run", False)),
@@ -201,6 +214,10 @@ class CCLAgent:
         self._stop_requested = False
         self._pause_requested = False
         self._pending_overrides = getattr(self, "_pending_overrides", {})
+        hypothesis_verdicts: list[HypothesisVerdict] = []
+        influence_records: list[LLMInfluenceRecord] = []
+        risk_budget = RiskBudgetState(total_budget=self.config.safety.max_risk_score * self.config.budget.max_steps)
+        pending_prediction: Optional[HypothesisPrediction] = None
 
         stop_reason = "budget_exhausted"
         max_steps = self.config.budget.max_steps
@@ -279,6 +296,35 @@ class CCLAgent:
                 if metrics.success:
                     self._update_surrogate(context, action.config, metrics.iteration_time_ms, step)
 
+                # WP4: Hypothesis verdict
+                if pending_prediction is not None:
+                    verdict = compute_verdict(pending_prediction, metrics)
+                    hypothesis_verdicts.append(verdict)
+                    if self.run_context:
+                        write_json(
+                            artifact_path(self.run_context, "steps", f"step_{step}_hypothesis_verdict.json"),
+                            asdict(verdict),
+                        )
+                    pending_prediction = None
+
+                # WP5: LLM influence record
+                advice_available = getattr(self.analyzer, "_last_advice_available", False)
+                advice_used = getattr(self.analyzer, "_last_advice_used", False)
+                prev_ms = state.history[-2].metrics.iteration_time_ms if len(state.history) > 1 else metrics.iteration_time_ms
+                improvement_ms = prev_ms - metrics.iteration_time_ms
+                inf_rec = record_influence(
+                    step=step,
+                    advice_available=advice_available,
+                    advice_used=advice_used,
+                    action_lane=action.kind,
+                    improvement_ms=improvement_ms,
+                )
+                influence_records.append(inf_rec)
+
+                # WP9: Risk budget tracking
+                risk_score = getattr(action.compiled, "risk_score", 0.0) if action.compiled else 0.0
+                risk_budget.record_step(risk_score)
+
                 prev_config = state.history[-2].action.config if len(state.history) > 1 else None
                 self._persist_step(record, prev_config=prev_config)
 
@@ -307,15 +353,34 @@ class CCLAgent:
                     break
                 current_config = decision.config
                 next_compiled = getattr(decision, "compiled", None)
+
+                # WP4: Create prediction for next hypothesis step
+                hyp = getattr(decision, "hypothesis", None)
+                if hyp is not None:
+                    surr_pred = self.surrogate.predict_one(decision.config, context)
+                    pending_prediction = make_prediction(
+                        hyp, step=step + 1, baseline_ms=metrics.iteration_time_ms,
+                        surrogate_mean=surr_pred.mean, surrogate_std=surr_pred.std,
+                    )
         finally:
             self._stop_mailbox_worker()
 
+        # WP8: Compute convergence evidence
+        convergence_evidence = compute_convergence_evidence(
+            state, surrogate=self.surrogate, context=context,
+        )
         if self.run_context:
             write_json(
                 artifact_path(self.run_context, "postrun", "convergence.json"),
-                {"reason": stop_reason, "steps": len(state.history)},
+                {"reason": stop_reason, "steps": len(state.history), "evidence": convergence_evidence.to_dict()},
             )
-        self._post_run(state, context)
+        self._post_run(
+            state, context,
+            hypothesis_verdicts=hypothesis_verdicts,
+            influence_records=influence_records,
+            risk_budget=risk_budget,
+            convergence_evidence=convergence_evidence,
+        )
         self.memory.save()
         try:
             self.llm_advisor.shutdown()
@@ -377,7 +442,16 @@ class CCLAgent:
         }
         write_json(artifact_path(self.run_context, "steps", f"step_{record.step}.json"), payload)
 
-    def _post_run(self, state: TuningState, context: ContextSignature) -> None:
+    def _post_run(
+        self,
+        state: TuningState,
+        context: ContextSignature,
+        *,
+        hypothesis_verdicts: list[HypothesisVerdict] | None = None,
+        influence_records: list[LLMInfluenceRecord] | None = None,
+        risk_budget: RiskBudgetState | None = None,
+        convergence_evidence=None,
+    ) -> None:
         if not state.best_record or not state.history:
             return
         baseline = state.history[0].metrics.iteration_time_ms
@@ -462,6 +536,77 @@ class CCLAgent:
                     "best_config": state.best_record.action.config.params,
                 },
             )
+
+        # --- WP4-10 postrun artifacts ---
+
+        # WP4: Hypothesis scorecard
+        scorecard = None
+        if hypothesis_verdicts:
+            scorecard = build_scorecard(hypothesis_verdicts)
+            if self.run_context:
+                write_json(
+                    artifact_path(self.run_context, "postrun", "hypothesis_scorecard.json"),
+                    scorecard.to_dict(),
+                )
+
+        # WP5: LLM influence summary
+        influence_summary = None
+        if influence_records:
+            influence_summary = build_influence_summary(influence_records)
+            if self.run_context:
+                write_json(
+                    artifact_path(self.run_context, "postrun", "llm_influence_report.json"),
+                    influence_summary.to_dict(),
+                )
+
+        # WP6: Attribution report
+        attribution = build_attribution_report(state, self.surrogate, context)
+        if self.run_context:
+            write_json(
+                artifact_path(self.run_context, "postrun", "attribution_report.json"),
+                attribution.to_dict(),
+            )
+
+        # WP7: Surrogate interpretation
+        if self._surrogate_records and self.surrogate._model is not None:
+            try:
+                interpretation = build_interpretation(
+                    self.surrogate, self._surrogate_records, context,
+                )
+                if self.run_context:
+                    write_json(
+                        artifact_path(self.run_context, "postrun", "surrogate_interpretation.json"),
+                        interpretation.to_dict(),
+                    )
+            except Exception as exc:
+                logger.warning("Surrogate interpretation failed: %s", exc)
+
+        # WP9: Risk budget report
+        if risk_budget is not None and self.run_context:
+            write_json(
+                artifact_path(self.run_context, "postrun", "risk_budget_report.json"),
+                asdict(risk_budget),
+            )
+
+        # WP10: Run narrative
+        try:
+            narrative = generate_narrative(
+                context=context,
+                baseline_ms=baseline,
+                best_ms=best,
+                total_steps=len(state.history),
+                scorecard=scorecard,
+                attribution=attribution,
+                convergence=convergence_evidence,
+                influence=influence_summary,
+            )
+            if self.run_context:
+                write_json(
+                    artifact_path(self.run_context, "postrun", "run_narrative.json"),
+                    {"title": narrative.title, "full_text": narrative.full_text, "key_findings": narrative.key_findings},
+                )
+        except Exception as exc:
+            logger.warning("Narrative generation failed: %s", exc)
 
     def _load_surrogate(self, context: ContextSignature) -> None:
         latest = self._find_latest_model(context)

@@ -62,6 +62,42 @@ class AnalyzerSelectionTest(unittest.TestCase):
         action = analyzer.plan_next_action(state, metrics, None, context, step=0, plan=None, workload=None, base_config=NCCLConfig())
         self.assertEqual(getattr(action, "kind", None), "hypothesis")
 
+    def test_agentic_schedule_avoids_numeric_only_when_hypothesis_every_is_large(self):
+        ps = ParameterSpace.from_list([ParameterSpec(name="NCCL_ALGO", kind="enum", choices=["RING"], default="RING")])
+        cfg = AgentConfig(
+            parameter_space=ps,
+            budget=TuningBudget(max_steps=4, hypothesis_every=100),
+            memory=MemoryConfig(),
+            rag=RagConfig(),
+            llm=LLMSettings(),
+            warm_start=WarmStartSettings(),
+            microbench=MicrobenchSettings(),
+            metrics=MetricsConfig(),
+            numeric_search=NumericSearchSettings(),
+            safety=SafetyConfig(),
+            execution=ExecutionConfig(),
+            surrogate=SurrogateConfig(),
+        )
+        analyzer = TuningAnalyzer(cfg, DummyHypothesis(), DummyNumeric(), DummyCompiler())
+        context = ContextSignature(workload="w", workload_kind="train", topology="t", scale="s", nodes=1)
+        metrics = Metrics(iteration_time_ms=1000.0, success=True)
+
+        class DummyState:
+            def __init__(self):
+                self.should_stop = False
+                self.best_record = None
+                self.history = []
+                self.plateau_count = 0
+                self.last_known_good = None
+            def recent_best_window(self):
+                return []
+
+        state = DummyState()
+        action = analyzer.plan_next_action(
+            state, metrics, None, context, step=1, plan=None, workload=None, base_config=NCCLConfig()
+        )
+        self.assertEqual(getattr(action, "kind", None), "hypothesis")
+
 
 if __name__ == "__main__":
     unittest.main()

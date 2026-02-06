@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ..types import (
     HypothesisAction,
@@ -33,6 +33,7 @@ class TuningAnalyzer:
         trace: TraceEmitter | None = None,
         memory: Any | None = None,
         llm_advisor: Any | None = None,
+        rag: Any | None = None,
     ):
         self.config = config
         self.hypothesis_generator = hypothesis_generator
@@ -43,6 +44,10 @@ class TuningAnalyzer:
         self.memory = memory
         self.stop_policy = StopPolicy(config)
         self.llm_advisor = llm_advisor
+        self.rag = rag
+        self._online_rag_loaded = False
+        self._online_rag_cache: List[Dict[str, Any]] = []
+        self._online_rag_cache_meta: Dict[str, Any] = {}
 
     def plan_next_action(
         self,
@@ -59,6 +64,13 @@ class TuningAnalyzer:
         recent_history = None
         llm_requested = bool(self.llm_advisor and self._should_request_llm_advice(step, state, last_metrics))
         if self.run_context and workload is not None:
+            rag_chunks = self._retrieve_online_rag_chunks(
+                step=step,
+                workload=workload,
+                context=context,
+                microbench=microbench,
+                last_metrics=last_metrics,
+            )
             memory_rules = []
             if self.memory is not None:
                 rules_with_scores = self.memory.retrieve_rules_with_scores(context, top_k=3)
@@ -87,7 +99,7 @@ class TuningAnalyzer:
                 context=context,
                 observations=observations,
                 memory_rules=memory_rules,
-                rag_chunks=[],
+                rag_chunks=rag_chunks,
                 surrogate=surrogate,
                 constraints=constraints,
             )
@@ -125,10 +137,15 @@ class TuningAnalyzer:
             "last_success": last_metrics.success if last_metrics else True,
             "sla_rollback": last_metrics.raw.get("sla_rollback") if last_metrics else False,
         }
+        self._last_advice_available = False
+        self._last_advice_used = False
 
         advice = None
         decision_advice = None
         advice_used = False
+        def _stamp_advice_state() -> None:
+            self._last_advice_available = decision_advice is not None
+            self._last_advice_used = bool(advice_used)
         if self.llm_advisor and llm_requested:
             timeout_s = getattr(self.config.llm, "online_soft_wait_s", 0.0) if getattr(self.config, "llm", None) else 0.0
             advice = self.llm_advisor.try_get(step=step, timeout_s=timeout_s)
@@ -200,6 +217,7 @@ class TuningAnalyzer:
                     why_rejected=[],
                     advice=decision_advice,
                 )
+                _stamp_advice_state()
                 self._persist_llm_advice(step, advice, advice_used)
                 self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
                 return action
@@ -214,6 +232,7 @@ class TuningAnalyzer:
                 why_rejected=[],
                 advice=decision_advice,
             )
+            _stamp_advice_state()
             self._persist_llm_advice(step, advice, advice_used)
             self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
             return action
@@ -265,6 +284,7 @@ class TuningAnalyzer:
                 why_rejected=[],
                 advice=explicit_convergence_advice or decision_advice,
             )
+            _stamp_advice_state()
             self._persist_llm_advice(step, advice, advice_used)
             self._persist_llm_convergence(step, explicit_convergence_advice, used=True)
             return action
@@ -316,15 +336,21 @@ class TuningAnalyzer:
                 why_rejected=[],
                 advice=decision_advice,
             )
+            _stamp_advice_state()
             self._persist_llm_advice(step, advice, advice_used)
             self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
             return action
 
-        default_use_hypothesis = (step % self.config.budget.hypothesis_every) == 0
+        default_use_hypothesis, default_lane_source = self._agentic_default_lane(
+            step=step,
+            state=state,
+            last_metrics=last_metrics,
+        )
         use_hypothesis, lane_source = self._choose_action_lane(
             action_preference=action_preference,
             advice=decision_advice,
             default_use_hypothesis=default_use_hypothesis,
+            default_lane_source=default_lane_source,
             llm_requested=llm_requested,
         )
         decision["lane_source"] = lane_source
@@ -477,6 +503,7 @@ class TuningAnalyzer:
                     why_rejected=["hypothesis_risk_too_high"],
                     advice=decision_advice,
                 )
+                _stamp_advice_state()
                 self._persist_llm_advice(step, advice, advice_used)
                 self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
                 return action
@@ -500,6 +527,7 @@ class TuningAnalyzer:
                 why_rejected=why_rejected,
                 advice=decision_advice,
             )
+            _stamp_advice_state()
             self._persist_llm_advice(step, advice, advice_used)
             self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
             return action
@@ -511,6 +539,16 @@ class TuningAnalyzer:
         config, search_result = self.numeric_manager.propose(
             plan, state, workload, base_config, step, context=context, guidance=guidance
         )
+        selected_idx = 0
+        selected_candidate = None
+        for idx, candidate in enumerate(search_result.candidates):
+            cand_cfg = getattr(getattr(candidate, "config", None), "params", None)
+            if isinstance(cand_cfg, dict) and cand_cfg == config.params:
+                selected_idx = idx
+                selected_candidate = candidate
+                break
+        if selected_candidate is None and search_result.candidates:
+            selected_candidate = search_result.candidates[0]
         candidate_payload = [
             {
                 "config": c.config.params,
@@ -530,14 +568,41 @@ class TuningAnalyzer:
         decision["action"] = "numeric"
         decision["candidates"] = candidate_payload
         self._persist(decision, step)
+        selected_pred = self._safe_float(getattr(selected_candidate, "predicted_time_ms", None)) if selected_candidate else None
+        selected_unc = self._safe_float(getattr(selected_candidate, "uncertainty", None)) if selected_candidate else None
+        selected_score_bits = [f"candidate:{selected_idx}"]
+        if selected_pred is not None:
+            selected_score_bits.append(f"pred_ms={selected_pred:.3f}")
+        if selected_unc is not None:
+            selected_score_bits.append(f"unc={selected_unc:.3f}")
+        why_selected = [
+            {
+                "claim": "numeric search selected " + ", ".join(selected_score_bits),
+                "refs": [
+                    f"candidate:{step}:{selected_idx}",
+                    f"steps/step_{step}_candidates_trace.json",
+                ],
+                "confidence": 0.75,
+            }
+        ]
+        why_rejected = []
+        if len(search_result.candidates) > 1:
+            why_rejected.append(
+                {
+                    "claim": f"{len(search_result.candidates) - 1} candidates ranked lower by surrogate objective",
+                    "refs": [f"steps/step_{step}_candidates_trace.json"],
+                    "confidence": 0.7,
+                }
+            )
         self._write_decision_record(
             step,
             action,
             state,
-            why_selected=["numeric_search"],
-            why_rejected=[],
+            why_selected=why_selected,
+            why_rejected=why_rejected,
             advice=decision_advice,
         )
+        _stamp_advice_state()
         self._persist_llm_advice(step, advice, advice_used)
         self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
         return action
@@ -651,6 +716,16 @@ class TuningAnalyzer:
             },
             refs=reason_refs,
             quality_flags=bundle.get("quality_flags", []),
+        )
+        top_claim = selected_claims[0]["claim"] if selected_claims else "no_explicit_claim"
+        top_refs = selected_claims[0].get("refs", []) if selected_claims else []
+        logger.info(
+            "Step %d decision: action=%s claim=%s refs=%s bundle=%s",
+            step,
+            chosen_action.get("kind"),
+            top_claim,
+            len(top_refs),
+            bundle_rel_path,
         )
 
     def _is_decision_eligible_advice(self, advice: Any) -> bool:
@@ -952,6 +1027,7 @@ class TuningAnalyzer:
         action_preference: str | None,
         advice: Any,
         default_use_hypothesis: bool,
+        default_lane_source: str,
         llm_requested: bool,
     ) -> tuple[bool, str]:
         if action_preference == "hypothesis":
@@ -978,8 +1054,46 @@ class TuningAnalyzer:
                 return False, "llm_numeric_guidance"
 
         if llm_requested and advice is None:
+            if default_use_hypothesis:
+                return True, "llm_pending_follow_schedule"
             return False, "llm_pending_hide_latency"
-        return default_use_hypothesis, "schedule_fallback"
+        return default_use_hypothesis, default_lane_source
+
+    def _agentic_default_lane(
+        self,
+        *,
+        step: int,
+        state: Any,
+        last_metrics: Any,
+    ) -> tuple[bool, str]:
+        configured_every = max(1, int(getattr(self.config.budget, "hypothesis_every", 2)))
+        llm_cfg = getattr(self.config, "llm", None)
+        llm_enabled = bool(llm_cfg and getattr(llm_cfg, "online_enabled", False))
+        effective_every = configured_every
+        if llm_enabled:
+            # Keep cadence agentic even when config uses a large numeric-heavy interval.
+            effective_every = min(configured_every, 3)
+
+        if llm_enabled and step == 1:
+            return True, "agentic_bootstrap_hypothesis"
+        if step % effective_every == 0:
+            return True, "agentic_schedule"
+
+        if llm_enabled:
+            action_kinds = [
+                getattr(getattr(rec, "action", None), "kind", None)
+                for rec in getattr(state, "history", [])
+            ]
+            explored = [k for k in action_kinds if k in ("numeric", "hypothesis")]
+            hyp_count = sum(1 for k in explored if k == "hypothesis")
+            total = max(1, len(explored))
+            hyp_ratio = hyp_count / total
+            if step >= 2 and hyp_ratio < 0.25 and (step % 2 == 0):
+                return True, "agentic_balance_hypothesis_ratio"
+            if getattr(state, "plateau_count", 0) >= 2:
+                return True, "agentic_plateau_probe"
+
+        return False, "schedule_fallback"
 
     def _is_generic_summary(self, summary: str) -> bool:
         text = " ".join(str(summary or "").lower().split())
@@ -1148,6 +1262,134 @@ class TuningAnalyzer:
             )
         except Exception:
             return None
+
+    def _retrieve_online_rag_chunks(
+        self,
+        *,
+        step: int,
+        workload: Any,
+        context: Any,
+        microbench: Any,
+        last_metrics: Any,
+    ) -> List[Dict[str, Any]]:
+        if self.rag is None:
+            return []
+        try:
+            if not self._online_rag_loaded:
+                self.rag.load_documents(self.config.rag)
+                self._online_rag_loaded = True
+
+            query_parts = [
+                str(getattr(workload, "name", "") or ""),
+                str(getattr(workload, "topology", "") or ""),
+                str(getattr(workload, "scale", "") or ""),
+                str(getattr(context, "workload_kind", "") or ""),
+            ]
+            if last_metrics is not None and isinstance(getattr(last_metrics, "raw", None), dict):
+                bottleneck = last_metrics.raw.get("bottleneck")
+                if bottleneck:
+                    query_parts.append(str(bottleneck))
+            important = getattr(microbench, "important_params", []) if microbench is not None else []
+            important_names: list[str] = []
+            for item in (important or [])[:3]:
+                param = getattr(item, "param", None)
+                if param:
+                    name = str(param)
+                    important_names.append(name)
+                    query_parts.append(name)
+
+            query = " ".join(p for p in query_parts if p).strip()
+            if not query:
+                return []
+
+            raw = getattr(last_metrics, "raw", {}) if last_metrics is not None else {}
+            bottleneck = raw.get("bottleneck") if isinstance(raw, dict) else None
+            fingerprint = "|".join(
+                [
+                    str(getattr(workload, "name", "") or ""),
+                    str(getattr(context, "topology", "") or ""),
+                    str(getattr(context, "scale", "") or ""),
+                    str(getattr(context, "workload_kind", "") or ""),
+                    str(bottleneck or ""),
+                    ",".join(important_names),
+                ]
+            )
+            refresh_every = max(1, int(getattr(self.config.rag, "online_refresh_every", 3)))
+            cache_step = int(self._online_rag_cache_meta.get("step", -10_000))
+            cache_fp = self._online_rag_cache_meta.get("fingerprint")
+            can_reuse = bool(self._online_rag_cache) and cache_fp == fingerprint and (step - cache_step) < refresh_every
+            if can_reuse:
+                chunks = [dict(item) for item in self._online_rag_cache]
+                if self.run_context is not None:
+                    write_json(
+                        artifact_path(self.run_context, "steps", f"step_{step}_online_rag_retrieval.json"),
+                        {
+                            "schema_version": "1.0",
+                            "query": query,
+                            "top_k": int(self._online_rag_cache_meta.get("top_k", 0) or 0),
+                            "reused": True,
+                            "source_step": cache_step,
+                            "chunks": chunks,
+                        },
+                    )
+                return chunks
+
+            top_k = max(1, int(getattr(self.config.rag, "top_k", 5)))
+            docs = self.rag.search(query, top_k=min(6, top_k))
+            chunks = [
+                {
+                    "ref": f"rag:{doc.doc_id}:{doc.chunk_id}",
+                    "doc_id": doc.doc_id,
+                    "chunk_id": doc.chunk_id,
+                    "score": doc.score,
+                    "text": doc.text,
+                }
+                for doc in docs
+            ]
+            self._online_rag_cache = [dict(item) for item in chunks]
+            self._online_rag_cache_meta = {
+                "step": step,
+                "fingerprint": fingerprint,
+                "top_k": min(6, top_k),
+                "query": query,
+            }
+
+            if self.run_context is not None:
+                write_json(
+                    artifact_path(self.run_context, "steps", f"step_{step}_online_rag_retrieval.json"),
+                    {
+                        "schema_version": "1.0",
+                        "query": query,
+                        "top_k": min(6, top_k),
+                        "reused": False,
+                        "chunks": chunks,
+                    },
+                )
+                if chunks:
+                    self.trace.event(
+                        run_id=self.run_context.run_id,
+                        phase="online",
+                        step=step,
+                        actor="agent",
+                        type="retrieval.rag",
+                        payload={
+                            "query": query,
+                            "count": len(chunks),
+                            "chunks": [
+                                {
+                                    "doc_id": chunk["doc_id"],
+                                    "chunk_id": chunk["chunk_id"],
+                                    "score": chunk["score"],
+                                }
+                                for chunk in chunks
+                            ],
+                        },
+                        refs=[chunk["ref"] for chunk in chunks if chunk.get("ref")],
+                    )
+            return chunks
+        except Exception as exc:
+            logger.warning("Online RAG retrieval failed at step %d: %s", step, exc)
+            return []
 
     def _persist_llm_convergence(self, step: int, advice: Any, used: bool) -> None:
         if not self.run_context or advice is None:

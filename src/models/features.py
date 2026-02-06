@@ -33,3 +33,19 @@ class ConfigFeaturizer:
             vector.append(float(context.nodes))
             vector.append(float(context.gpus_per_node or 0))
         return vector
+
+    def feature_names(self) -> List[str]:
+        names: List[str] = []
+        for name, spec in sorted(self.parameter_space.specs.items()):
+            if spec.kind == "bool":
+                names.append(name)
+            elif spec.kind == "enum":
+                for choice in (spec.choices or []):
+                    names.append(f"{name}={choice}")
+            elif spec.kind in ("int", "float"):
+                names.append(f"log({name})")
+            else:
+                names.append(name)
+        names.append("nodes")
+        names.append("gpus_per_node")
+        return names

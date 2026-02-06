@@ -4,7 +4,7 @@
     "max_steps": 10,
     "min_improvement": 0.005,
     "patience": 4,
-    "hypothesis_every": 100,
+    "hypothesis_every": 3,
     "plateau_eps": 0.002,
     "plateau_window": 4,
     "stable_steps": 2

@@ -159,7 +159,9 @@ class TestOnlineAdviceAlignment(unittest.TestCase):
             workload=None,
             base_config=self.base,
         )
-        self.assertEqual(getattr(action, "kind", None), "numeric")
+        # Late advice from another step must not drive current-step lane.
+        # With hypothesis_every=1, schedule defaults to hypothesis.
+        self.assertEqual(getattr(action, "kind", None), "hypothesis")
 
     def test_ineligible_current_step_advice_is_not_used(self):
         current = Advice(
@@ -181,7 +183,8 @@ class TestOnlineAdviceAlignment(unittest.TestCase):
             workload=None,
             base_config=self.base,
         )
-        self.assertEqual(getattr(action, "kind", None), "numeric")
+        # Ineligible advice must be ignored; schedule still applies.
+        self.assertEqual(getattr(action, "kind", None), "hypothesis")
 
 
 if __name__ == "__main__":

@@ -114,10 +114,11 @@ class TestOnlineAdvisorMerge(unittest.TestCase):
             action_preference=None,
             advice=None,
             default_use_hypothesis=True,
+            default_lane_source="agentic_schedule",
             llm_requested=True,
         )
-        self.assertFalse(use_hypothesis)
-        self.assertEqual(source, "llm_pending_hide_latency")
+        self.assertTrue(use_hypothesis)
+        self.assertEqual(source, "llm_pending_follow_schedule")
 
 
 if __name__ == "__main__":

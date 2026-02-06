@@ -371,6 +371,7 @@ class MicrobenchSettings:
 class RagConfig:
     mode: str = "jaccard"  # jaccard, embeddings
     top_k: int = 5
+    online_refresh_every: int = 3
     rebuild_index: bool = False
     index_path: str = "rag_index"
     docs_paths: List[str] = field(default_factory=list)

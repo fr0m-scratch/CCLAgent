@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional
 import uuid
+from typing import Any, Dict, List, Optional
 
 from .schema import MemorySchema, Rule, SurrogateRecord
 from .index import rule_score, context_similarity
@@ -25,6 +26,10 @@ class MemoryStore:
         try:
             payload = read_json(self.path)
         except FileNotFoundError:
+            return
+        except json.JSONDecodeError:
+            # Empty or partially-written memory files should not crash startup.
+            self.save()
             return
         schema_version = payload.get("schema_version")
         if not schema_version:

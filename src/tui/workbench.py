@@ -370,19 +370,19 @@ class AgentWorkbench(App):
                 with Vertical(id="right-pane"):
                     with TabbedContent(id="right-tabs"):
                         with TabPane("Overview", id="right-overview"):
-                            yield RichLog(id="overview-log", auto_scroll=False, wrap=True)
+                            yield RichLog(id="overview-log", auto_scroll=True, wrap=True)
                         with TabPane("Event Detail", id="right-event"):
-                            yield RichLog(id="event-detail-log", auto_scroll=False, wrap=True)
+                            yield RichLog(id="event-detail-log", auto_scroll=True, wrap=True)
                         with TabPane("LLM Detail", id="right-llm"):
-                            yield RichLog(id="llm-detail-log", auto_scroll=False, wrap=True)
+                            yield RichLog(id="llm-detail-log", auto_scroll=True, wrap=True)
                         with TabPane("Online Reasoning", id="right-reasoning"):
-                            yield RichLog(id="reasoning-log", auto_scroll=False, wrap=True)
+                            yield RichLog(id="reasoning-log", auto_scroll=True, wrap=True)
                         with TabPane("Context Engineering", id="right-context"):
-                            yield RichLog(id="context-log", auto_scroll=False, wrap=True)
+                            yield RichLog(id="context-log", auto_scroll=True, wrap=True)
                         with TabPane("Pruning Lens", id="right-pruning"):
-                            yield RichLog(id="pruning-log", auto_scroll=False, wrap=True)
+                            yield RichLog(id="pruning-log", auto_scroll=True, wrap=True)
                         with TabPane("LLM Reasoning", id="right-llmreason"):
-                            yield RichLog(id="llm-reasoning-log", auto_scroll=False, wrap=True)
+                            yield RichLog(id="llm-reasoning-log", auto_scroll=True, wrap=True)
 
             with Container(id="chat-pane"):
                 yield RichLog(id="chat-log", auto_scroll=True, wrap=True)
@@ -1060,16 +1060,16 @@ class AgentWorkbench(App):
 
     def _apply_defaults(self) -> None:
         if self.state.selected_event_idx is None and self.state.events:
-            self.state.selected_event_idx = 0
+            self.state.selected_event_idx = max(0, len(self.state.events) - 1)
 
         if self.state.selected_step is None and self.state.base_steps:
-            self.state.selected_step = min(self.state.base_steps.keys())
+            self.state.selected_step = max(self.state.base_steps.keys())
 
         if self.state.selected_llm_idx is None and self.state.llm_calls:
-            self.state.selected_llm_idx = 0
+            self.state.selected_llm_idx = max(0, len(self.state.llm_calls) - 1)
 
         if self.state.selected_async_step is None and self.state.async_advice:
-            self.state.selected_async_step = min(self.state.async_advice.keys())
+            self.state.selected_async_step = max(self.state.async_advice.keys())
 
     def _should_render(self, slot: str, signature: Any, *, min_interval_s: float = 0.0) -> bool:
         previous = self._render_signatures.get(slot)
