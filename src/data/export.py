@@ -40,10 +40,18 @@ def export_sft_dataset(run_dir: str, out_path: str) -> None:
             + "\n"
         )
         for record in records:
+            step = record.get("step")
+            context_pack = _load_step_artifact(run_dir, step, "context_pack")
+            decision_record = _load_step_artifact(run_dir, step, "decision_record")
+            decision_bundle = _load_step_artifact(run_dir, step, "decision_bundle")
             payload = {
                 "context": context,
+                "context_pack": context_pack,
                 "metrics": record.get("metrics", {}),
                 "action": record.get("action", {}),
+                "decision_record": decision_record,
+                "decision_bundle": decision_bundle,
+                "evidence_refs": _extract_refs(decision_bundle),
             }
             handle.write(json.dumps(payload) + "\n")
 
@@ -70,10 +78,43 @@ def export_rl_dataset(run_dir: str, out_path: str) -> None:
                 reward = record["metrics"]["iteration_time_ms"] - next_record["metrics"]["iteration_time_ms"]
             except Exception:
                 reward = 0.0
+            step = record.get("step")
+            context_pack = _load_step_artifact(run_dir, step, "context_pack")
+            decision_bundle = _load_step_artifact(run_dir, step, "decision_bundle")
             payload = {
-                "state": record.get("metrics", {}),
+                "state": {
+                    "metrics": record.get("metrics", {}),
+                    "context_pack": context_pack,
+                },
                 "action": record.get("action", {}),
                 "reward": reward,
-                "next_state": next_record.get("metrics", {}),
+                "next_state": {
+                    "metrics": next_record.get("metrics", {}),
+                    "context_pack": _load_step_artifact(run_dir, next_record.get("step"), "context_pack"),
+                },
+                "decision_bundle": decision_bundle,
+                "evidence_refs": _extract_refs(decision_bundle),
             }
             handle.write(json.dumps(payload) + "\n")
+
+
+def _load_step_artifact(run_dir: str, step: int | None, suffix: str) -> dict:
+    if step is None:
+        return {}
+    path = Path(run_dir) / "steps" / f"step_{step}_{suffix}.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _extract_refs(payload: dict) -> list:
+    if not isinstance(payload, dict):
+        return []
+    refs = payload.get("call_chain")
+    if isinstance(refs, list):
+        return refs
+    selected = payload.get("chosen_action", {}).get("selected_candidate_ref") if isinstance(payload.get("chosen_action"), dict) else None
+    return [selected] if isinstance(selected, str) else []

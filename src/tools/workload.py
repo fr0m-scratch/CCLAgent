@@ -75,15 +75,36 @@ class WorkloadRunner:
                 timeout = int(env_overrides["CCL_EVAL_TIMEOUT_SEC"])
             except ValueError:
                 pass
+        replicates = self._replicates_from_env(env_overrides, workload.env)
         try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
+            if replicates <= 1:
+                result = subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env=env,
+                )
+                outputs = [result.stdout.strip()]
+                stdout_logs = [result.stdout]
+                stderr_logs = [result.stderr]
+            else:
+                outputs = []
+                stdout_logs = []
+                stderr_logs = []
+                for _rep in range(replicates):
+                    result = subprocess.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        env=env,
+                    )
+                    outputs.append(result.stdout.strip())
+                    stdout_logs.append(result.stdout)
+                    stderr_logs.append(result.stderr)
         except subprocess.SubprocessError as exc:
             logger.error("Workload failed: %s", exc)
             if self.config.allow_fallback:
@@ -97,15 +118,45 @@ class WorkloadRunner:
                 return metrics
             raise ToolExecutionError(f"workload failed: {exc}") from exc
 
-        raw_output = result.stdout.strip()
         if self.metrics_parser:
-            metrics = self.metrics_parser(raw_output)
+            metrics_list = [self.metrics_parser(raw_output) for raw_output in outputs]
+            metrics = _aggregate_metrics(metrics_list)
         else:
             elapsed = time.time() - start
-            metrics = Metrics(iteration_time_ms=elapsed * 1000.0, raw={"raw": raw_output})
+            metrics = Metrics(iteration_time_ms=elapsed * 1000.0, raw={"raw": outputs[0] if outputs else ""})
+        metrics.raw["replicates"] = replicates
+        if replicates > 1:
+            sample_ms = [item.iteration_time_ms for item in metrics_list] if self.metrics_parser else [metrics.iteration_time_ms]
+            mean_ms = sum(sample_ms) / max(1, len(sample_ms))
+            variance = sum((v - mean_ms) ** 2 for v in sample_ms) / max(1, len(sample_ms))
+            std_ms = math.sqrt(variance)
+            ci95 = 1.96 * std_ms / math.sqrt(max(1, len(sample_ms)))
+            metrics.raw["replicate_samples_ms"] = sample_ms
+            metrics.raw["replicate_mean_ms"] = mean_ms
+            metrics.raw["replicate_std_ms"] = std_ms
+            metrics.raw["replicate_ci95_ms"] = ci95
 
         if self.run_context:
-            self._persist_logs(step, stdout=result.stdout, stderr=result.stderr, artifact_subdir=artifact_subdir)
+            self._persist_logs(step, stdout="\n".join(stdout_logs), stderr="\n".join(stderr_logs), artifact_subdir=artifact_subdir)
+            if replicates > 1:
+                for idx, (out, err) in enumerate(zip(stdout_logs, stderr_logs)):
+                    self._persist_logs(
+                        step,
+                        stdout=out,
+                        stderr=err,
+                        artifact_subdir=f"{artifact_subdir}/step_{step}_replicate_{idx}",
+                    )
+                write_json(
+                    artifact_path(self.run_context, artifact_subdir, f"step_{step}_replicate_summary.json"),
+                    {
+                        "schema_version": "1.0",
+                        "replicates": replicates,
+                        "sample_ms": metrics.raw.get("replicate_samples_ms", []),
+                        "mean_ms": metrics.raw.get("replicate_mean_ms"),
+                        "std_ms": metrics.raw.get("replicate_std_ms"),
+                        "ci95_ms": metrics.raw.get("replicate_ci95_ms"),
+                    },
+                )
             write_json(
                 artifact_path(self.run_context, artifact_subdir, f"workload_cmd_step_{step}.json"),
                 {
@@ -113,6 +164,7 @@ class WorkloadRunner:
                     "launcher": workload.launcher,
                     "launcher_args": workload.launcher_args,
                     "env_overrides": env_overrides or {},
+                    "replicates": replicates,
                 },
             )
 
@@ -208,6 +260,17 @@ class WorkloadRunner:
                 continue
         return 200
 
+    def _replicates_from_env(self, env_overrides: Optional[Dict[str, str]], workload_env: Dict[str, str]) -> int:
+        for source in (env_overrides or {}, workload_env, dict(os.environ)):
+            value = source.get("CCL_REPLICATES")
+            if value is None:
+                continue
+            try:
+                return max(1, int(value))
+            except ValueError:
+                continue
+        return 1
+
     def _simulate_iter_samples(self, mean_ms: float, count: int, seed: int) -> list[float]:
         rng = random.Random(seed)
         samples: list[float] = []
@@ -299,3 +362,26 @@ class WorkloadRunner:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+
+def _aggregate_metrics(metrics_list: list[Metrics]) -> Metrics:
+    if not metrics_list:
+        return Metrics(iteration_time_ms=float("inf"), success=False, failure_reason="no_metrics")
+    if len(metrics_list) == 1:
+        return metrics_list[0]
+    sample_ms = [item.iteration_time_ms for item in metrics_list]
+    mean_ms = sum(sample_ms) / max(1, len(sample_ms))
+    first = metrics_list[0]
+    return Metrics(
+        iteration_time_ms=mean_ms,
+        throughput=first.throughput,
+        comm_time_ms=first.comm_time_ms,
+        busbw_gbps=first.busbw_gbps,
+        algbw_gbps=first.algbw_gbps,
+        loss=first.loss,
+        error_budget=first.error_budget,
+        success=all(item.success for item in metrics_list),
+        failure_reason=None if all(item.success for item in metrics_list) else "replicate_failure",
+        raw={"replicate_count": len(metrics_list)},
+        schema_version=first.schema_version,
+    )

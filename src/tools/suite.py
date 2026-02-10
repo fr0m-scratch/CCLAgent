@@ -10,9 +10,12 @@ from .ext_net import ExtNetBridge
 from .ext_tuner import ExtTunerBridge
 from .metrics import MetricsCollector
 from .microbench import MicrobenchRunner
+from .nccl_debug import NcclDebugTool
 from .nccl import NCCLInterface
 from .nccltest import NcclTestRunner
 from .numeric_search import NumericSearchTool
+from .profiler import ProfilerCollector
+from .debug_playbook import DebugPlaybook
 from .sla import SLAEnforcer
 from .training import TrainingJobRunner
 from .workload import WorkloadRunner
@@ -32,4 +35,7 @@ class ToolSuite:
     ext_tuner: Optional[ExtTunerBridge] = None
     ext_net: Optional[ExtNetBridge] = None
     numeric_search: Optional[NumericSearchTool] = None
+    nccl_debug: Optional[NcclDebugTool] = None
+    profiler: Optional[ProfilerCollector] = None
+    debug_playbook: Optional[DebugPlaybook] = None
     run_context: Optional[RunContext] = None

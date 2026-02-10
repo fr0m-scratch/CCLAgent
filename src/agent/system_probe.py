@@ -7,6 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from ..observability import build_topology_signature
 from ..trace import NullTraceEmitter, TraceEmitter
 from ..types import WorkloadSpec
 from ..utils import artifact_path, write_json
@@ -164,6 +165,13 @@ class SystemProbeCollector:
         nic_count = workload.metadata.get("nic_count")
         if nic_count is None:
             nic_count = 1
+        topo_text = str(by_name.get("nvidia_smi_topology", {}).get("stdout", ""))
+        topo_sig = build_topology_signature(
+            topo_text=topo_text,
+            ib_text=ib_stdout,
+            fallback_gpu_count=int(gpus_per_node),
+            fallback_nic_count=int(nic_count),
+        )
         return {
             "probe_collected": True,
             "nodes": workload.nodes,
@@ -174,6 +182,7 @@ class SystemProbeCollector:
             "network": workload.metadata.get("network") or "ib",
             "network_link_rate": link_rate,
             "nic_count": int(nic_count),
+            "topology_signature": topo_sig.to_dict(),
             "commands": [
                 {
                     "name": item.get("name"),

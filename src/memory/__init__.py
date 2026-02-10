@@ -79,6 +79,8 @@ class MemoryStore:
             improvement=improvement,
             evidence=evidence or {},
             rule_type=rule_type,
+            applicability_signature=self._build_applicability_signature(context),
+            claims=self._extract_claims(evidence),
         )
         self.rules.append(rule)
         self._handle_conflicts(rule)
@@ -154,3 +156,32 @@ class MemoryStore:
             if key in b.config_patch and b.config_patch[key] != value:
                 return True
         return False
+
+    def _build_applicability_signature(self, context: ContextSignature) -> Dict[str, Any]:
+        payload = asdict(context)
+        keys = [
+            "workload",
+            "workload_kind",
+            "topology",
+            "scale",
+            "nodes",
+            "gpus_per_node",
+            "gpu_type",
+            "network",
+            "nic_count",
+        ]
+        return {key: payload.get(key) for key in keys if payload.get(key) is not None}
+
+    def _extract_claims(self, evidence: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+        if not isinstance(evidence, dict):
+            return []
+        claims = evidence.get("claims")
+        if isinstance(claims, list):
+            out: List[Dict[str, Any]] = []
+            for item in claims:
+                if isinstance(item, dict):
+                    out.append(item)
+                elif isinstance(item, str):
+                    out.append({"claim": item, "refs": []})
+            return out[:5]
+        return []

@@ -16,12 +16,14 @@ class TestDecisionBundleRefs(unittest.TestCase):
             refs_fallback=["metric:4:primary"],
             candidates_considered=[
                 {
+                    "candidate_id": "5_0",
                     "candidate_ref": "candidate:5:0",
                     "score_breakdown": {"pred_time_ms": 100.0, "uncertainty": 4.0, "risk_score": 0.1},
                     "status": "selected",
                     "refs": [],
                 },
                 {
+                    "candidate_id": "5_1",
                     "candidate_ref": "candidate:5:1",
                     "score_breakdown": {"pred_time_ms": 110.0, "uncertainty": 6.0, "risk_score": 0.15},
                     "status": "rejected",
@@ -29,7 +31,51 @@ class TestDecisionBundleRefs(unittest.TestCase):
                     "refs": [],
                 },
                 {
+                    "candidate_id": "5_2",
                     "candidate_ref": "candidate:5:2",
+                    "score_breakdown": {"pred_time_ms": 120.0, "uncertainty": 8.0, "risk_score": 0.2},
+                    "status": "rejected",
+                    "reject_reason": "dominated",
+                    "refs": [],
+                },
+            ],
+        )
+        errors = validate_decision_bundle(payload)
+        self.assertIn("candidate_id_ref_mismatch:0", errors)
+        self.assertIn("candidate_id_ref_mismatch:1", errors)
+        self.assertIn("candidate_id_ref_mismatch:2", errors)
+        self.assertTrue(payload["chosen_action"].get("selected_candidate_ref"))
+        self.assertTrue(payload["chosen_action"].get("selected_candidate_id"))
+
+    def test_builder_with_consistent_candidate_id_passes(self):
+        payload = build_decision_bundle(
+            step=5,
+            chosen_action={"kind": "numeric", "rationale": "numeric search"},
+            why_selected=["selected best predicted time"],
+            why_rejected=["higher predicted time"],
+            context_ref="steps/step_5_context_pack.json",
+            constraints_snapshot={"risk_max": 0.7, "sla_max_iteration_time": None, "budget_remaining_steps": 4},
+            rollback_plan={"last_known_good_ref": "metric:4:primary"},
+            refs_fallback=["metric:4:primary"],
+            candidates_considered=[
+                {
+                    "candidate_id": "5_0",
+                    "candidate_ref": "candidate:5:5_0",
+                    "score_breakdown": {"pred_time_ms": 100.0, "uncertainty": 4.0, "risk_score": 0.1},
+                    "status": "selected",
+                    "refs": [],
+                },
+                {
+                    "candidate_id": "5_1",
+                    "candidate_ref": "candidate:5:5_1",
+                    "score_breakdown": {"pred_time_ms": 110.0, "uncertainty": 6.0, "risk_score": 0.15},
+                    "status": "rejected",
+                    "reject_reason": "dominated",
+                    "refs": [],
+                },
+                {
+                    "candidate_id": "5_2",
+                    "candidate_ref": "candidate:5:5_2",
                     "score_breakdown": {"pred_time_ms": 120.0, "uncertainty": 8.0, "risk_score": 0.2},
                     "status": "rejected",
                     "reject_reason": "dominated",
@@ -48,7 +94,13 @@ class TestDecisionBundleRefs(unittest.TestCase):
             "schema_version": "2.0",
             "step": 1,
             "context_ref": "steps/step_1_context_pack.json",
-            "chosen_action": {"kind": "numeric", "rationale": "x", "call_chain": ["metric:0:primary"]},
+            "chosen_action": {
+                "kind": "numeric",
+                "rationale": "x",
+                "call_chain": ["metric:0:primary"],
+                "selected_candidate_ref": "candidate:1:1_0",
+                "selected_candidate_id": "1_0",
+            },
             "candidates_considered": [],
             "why_selected": [{"claim": "x", "refs": []}],
             "why_rejected": [],

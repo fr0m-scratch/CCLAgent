@@ -21,6 +21,15 @@ Network / transport
 - NCCL_IB_QPS_PER_CONNECTION: QPs per connection
 - NCCL_SHM_DISABLE: disable shared memory transport
 
+Debug / observability
+---------------------
+- NCCL_DEBUG: log verbosity (INFO/WARN/TRACE depending on NCCL build)
+- NCCL_DEBUG_SUBSYS: subsystem filters (`INIT,GRAPH,NET,TUNE,...`)
+- NCCL_TOPO_DUMP_FILE: topology dump path
+- NCCL_GRAPH_DUMP_FILE: graph dump path
+- NCCL_BLOCKING_WAIT: blocking wait mode for hang diagnosis
+- NCCL_ASYNC_ERROR_HANDLING: async error surfacing
+
 Notes
 -----
 - Interactions between ALGO/PROTO and channel counts are workload/topology specific.

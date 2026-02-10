@@ -329,6 +329,7 @@ class AgentWorkbench(App):
         self._step_row_to_step: Dict[str, int] = {}
         self._async_row_to_step: Dict[str, int] = {}
         self._left_scroll_y: Dict[str, float] = {}
+        self._suppress_table_row_selected_events = False
 
         # Performance caches.
         self._refresh_cycle_active = False
@@ -458,6 +459,9 @@ class AgentWorkbench(App):
             self._emit_chat("System", f"Failed to send command: {exc}", style="bold red")
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if self._suppress_table_row_selected_events:
+            return
+
         table_id = event.data_table.id or ""
         row_key = self._row_key_to_str(event.row_key)
 
@@ -465,29 +469,23 @@ class AgentWorkbench(App):
             idx = self._event_row_to_idx.get(row_key)
             if idx is not None:
                 self.state.selected_event_idx = idx
-                self.action_focus_right("event")
-                self._render_event_detail()
+                self._render_active_right_pane()
         elif table_id == "steps-table":
             step = self._step_row_to_step.get(row_key)
             if step is not None:
                 self.state.selected_step = step
-                self.action_focus_right("reasoning")
-                self._render_reasoning_detail()
-                self._render_context_detail()
+                self._render_active_right_pane()
         elif table_id == "llm-table":
             idx = self._llm_row_to_idx.get(row_key)
             if idx is not None:
                 self.state.selected_llm_idx = idx
-                self.action_focus_right("llm")
-                self._render_llm_detail()
-                self._render_context_detail()
+                self._render_active_right_pane()
         elif table_id == "async-table":
             step = self._async_row_to_step.get(row_key)
             if step is not None:
                 self.state.selected_async_step = step
                 self.state.selected_step = step
-                self.action_focus_right("reasoning")
-                self._render_reasoning_detail()
+                self._render_active_right_pane()
 
     def _init_tables(self) -> None:
         events = self.query_one("#events-table", DataTable)
@@ -536,7 +534,6 @@ class AgentWorkbench(App):
 
             if step_changed:
                 self._derive_iteration_series()
-            self._apply_defaults()
 
             self._render_cards()
             self._render_active_left_table()
@@ -1058,19 +1055,6 @@ class AgentWorkbench(App):
         self.state.best_iteration_ms = min(times) if times else None
         self.state.native_baseline_ms = native_baselines[-1] if native_baselines else None
 
-    def _apply_defaults(self) -> None:
-        if self.state.selected_event_idx is None and self.state.events:
-            self.state.selected_event_idx = max(0, len(self.state.events) - 1)
-
-        if self.state.selected_step is None and self.state.base_steps:
-            self.state.selected_step = max(self.state.base_steps.keys())
-
-        if self.state.selected_llm_idx is None and self.state.llm_calls:
-            self.state.selected_llm_idx = max(0, len(self.state.llm_calls) - 1)
-
-        if self.state.selected_async_step is None and self.state.async_advice:
-            self.state.selected_async_step = max(self.state.async_advice.keys())
-
     def _should_render(self, slot: str, signature: Any, *, min_interval_s: float = 0.0) -> bool:
         previous = self._render_signatures.get(slot)
         if previous == signature:
@@ -1135,32 +1119,36 @@ class AgentWorkbench(App):
         sig = (len(events), last_key, self.state.selected_event_idx, active_tab)
         if not self._should_render("table_events", sig, min_interval_s=0.15):
             return
-        self._capture_left_table_state(table)
-        table.clear(columns=False)
-        self._event_row_to_idx.clear()
+        self._suppress_table_row_selected_events = True
+        try:
+            self._capture_left_table_state(table)
+            table.clear(columns=False)
+            self._event_row_to_idx.clear()
 
-        base_idx = max(0, len(self.state.events) - len(events))
-        for offset, event in enumerate(events):
-            idx = base_idx + offset
-            row_key = str(idx)
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            status = event.get("status", "ok")
-            err = payload.get("error") or event.get("error")
-            status_cell = "ERR" if err else str(status).upper()
-            duration = event.get("duration_ms")
-            dur_cell = f"{duration:.1f}" if isinstance(duration, (int, float)) else "-"
-            table.add_row(
-                _fmt_ts(event.get("ts")),
-                str(event.get("phase", "?"))[:8],
-                str(event.get("step", "-")),
-                str(event.get("actor", "?"))[:10],
-                str(event.get("type", "?"))[:48],
-                status_cell,
-                dur_cell,
-                key=row_key,
-            )
-            self._event_row_to_idx[row_key] = idx
-        self._restore_left_table_state(table)
+            base_idx = max(0, len(self.state.events) - len(events))
+            for offset, event in enumerate(events):
+                idx = base_idx + offset
+                row_key = str(idx)
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                status = event.get("status", "ok")
+                err = payload.get("error") or event.get("error")
+                status_cell = "ERR" if err else str(status).upper()
+                duration = event.get("duration_ms")
+                dur_cell = f"{duration:.1f}" if isinstance(duration, (int, float)) else "-"
+                table.add_row(
+                    _fmt_ts(event.get("ts")),
+                    str(event.get("phase", "?"))[:8],
+                    str(event.get("step", "-")),
+                    str(event.get("actor", "?"))[:10],
+                    str(event.get("type", "?"))[:48],
+                    status_cell,
+                    dur_cell,
+                    key=row_key,
+                )
+                self._event_row_to_idx[row_key] = idx
+            self._restore_left_table_state(table)
+        finally:
+            self._suppress_table_row_selected_events = False
 
     def _render_steps_table(self) -> None:
         table = self.query_one("#steps-table", DataTable)
@@ -1175,54 +1163,58 @@ class AgentWorkbench(App):
         sig = (tuple(step_sig), self.state.selected_step, active_tab)
         if not self._should_render("table_steps", sig, min_interval_s=0.25):
             return
-        self._capture_left_table_state(table)
-        table.clear(columns=False)
-        self._step_row_to_step.clear()
+        self._suppress_table_row_selected_events = True
+        try:
+            self._capture_left_table_state(table)
+            table.clear(columns=False)
+            self._step_row_to_step.clear()
 
-        if not steps:
-            self._restore_left_table_state(table)
-            return
+            if not steps:
+                self._restore_left_table_state(table)
+                return
 
-        baseline = None
-        first = self.state.base_steps.get(steps[0], {})
-        first_metrics = first.get("metrics", {}) if isinstance(first.get("metrics"), dict) else {}
-        baseline = _safe_float(first_metrics.get("iteration_time_ms"))
+            baseline = None
+            first = self.state.base_steps.get(steps[0], {})
+            first_metrics = first.get("metrics", {}) if isinstance(first.get("metrics"), dict) else {}
+            baseline = _safe_float(first_metrics.get("iteration_time_ms"))
 
-        for step in steps:
-            rec = self.state.base_steps.get(step, {})
-            action = rec.get("action", {}) if isinstance(rec.get("action"), dict) else {}
-            action_kind = action.get("kind", "?")
-            if self.state.run_dir is not None:
-                decision = self._read_json_cached(
-                    self.state.run_dir / "steps" / f"step_{step}_decision.json"
+            for step in steps:
+                rec = self.state.base_steps.get(step, {})
+                action = rec.get("action", {}) if isinstance(rec.get("action"), dict) else {}
+                action_kind = action.get("kind", "?")
+                if self.state.run_dir is not None:
+                    decision = self._read_json_cached(
+                        self.state.run_dir / "steps" / f"step_{step}_decision.json"
+                    )
+                    if isinstance(decision, dict) and decision.get("action"):
+                        action_kind = decision.get("action")
+                metrics = rec.get("metrics", {}) if isinstance(rec.get("metrics"), dict) else {}
+                iter_ms = _safe_float(metrics.get("iteration_time_ms"))
+                iter_cell = f"{iter_ms:.2f}" if iter_ms is not None else "-"
+                delta_cell = "-"
+                if baseline and iter_ms is not None:
+                    delta_cell = f"{(baseline - iter_ms) / baseline * 100.0:+.2f}"
+                ok_cell = "yes" if metrics.get("success") else "no"
+
+                bottleneck = self._read_json_cached(self.state.run_dir / "steps" / f"step_{step}_bottleneck.json")
+                bottleneck_cls = (
+                    bottleneck.get("class", "-") if isinstance(bottleneck, dict) else "-"
                 )
-                if isinstance(decision, dict) and decision.get("action"):
-                    action_kind = decision.get("action")
-            metrics = rec.get("metrics", {}) if isinstance(rec.get("metrics"), dict) else {}
-            iter_ms = _safe_float(metrics.get("iteration_time_ms"))
-            iter_cell = f"{iter_ms:.2f}" if iter_ms is not None else "-"
-            delta_cell = "-"
-            if baseline and iter_ms is not None:
-                delta_cell = f"{(baseline - iter_ms) / baseline * 100.0:+.2f}"
-            ok_cell = "yes" if metrics.get("success") else "no"
 
-            bottleneck = self._read_json_cached(self.state.run_dir / "steps" / f"step_{step}_bottleneck.json")
-            bottleneck_cls = (
-                bottleneck.get("class", "-") if isinstance(bottleneck, dict) else "-"
-            )
-
-            row_key = str(step)
-            table.add_row(
-                str(step),
-                str(action_kind),
-                iter_cell,
-                delta_cell,
-                ok_cell,
-                str(bottleneck_cls),
-                key=row_key,
-            )
-            self._step_row_to_step[row_key] = step
-        self._restore_left_table_state(table)
+                row_key = str(step)
+                table.add_row(
+                    str(step),
+                    str(action_kind),
+                    iter_cell,
+                    delta_cell,
+                    ok_cell,
+                    str(bottleneck_cls),
+                    key=row_key,
+                )
+                self._step_row_to_step[row_key] = step
+            self._restore_left_table_state(table)
+        finally:
+            self._suppress_table_row_selected_events = False
 
     def _render_llm_table(self) -> None:
         table = self.query_one("#llm-table", DataTable)
@@ -1233,35 +1225,39 @@ class AgentWorkbench(App):
         sig = (len(calls), last_call_id, last_duration, self.state.selected_llm_idx, active_tab)
         if not self._should_render("table_llm", sig, min_interval_s=0.25):
             return
-        self._capture_left_table_state(table)
-        table.clear(columns=False)
-        self._llm_row_to_idx.clear()
+        self._suppress_table_row_selected_events = True
+        try:
+            self._capture_left_table_state(table)
+            table.clear(columns=False)
+            self._llm_row_to_idx.clear()
 
-        for idx, call in enumerate(calls):
-            global_idx = len(self.state.llm_calls) - len(calls) + idx
-            row_key = str(global_idx)
+            for idx, call in enumerate(calls):
+                global_idx = len(self.state.llm_calls) - len(calls) + idx
+                row_key = str(global_idx)
 
-            trace = call.get("trace", {}) if isinstance(call.get("trace"), dict) else {}
-            step = trace.get("step", "-")
-            phase = trace.get("phase", "?")
-            model = call.get("model", "?")
-            ctx = call.get("context_window", {}) if isinstance(call.get("context_window"), dict) else {}
-            ctx_tok = ctx.get("total_tokens", "-")
-            dur = call.get("duration_ms")
-            dur_cell = f"{dur:.1f}" if isinstance(dur, (int, float)) else "-"
-            call_short = str(call.get("call_id", "?"))[:10]
+                trace = call.get("trace", {}) if isinstance(call.get("trace"), dict) else {}
+                step = trace.get("step", "-")
+                phase = trace.get("phase", "?")
+                model = call.get("model", "?")
+                ctx = call.get("context_window", {}) if isinstance(call.get("context_window"), dict) else {}
+                ctx_tok = ctx.get("total_tokens", "-")
+                dur = call.get("duration_ms")
+                dur_cell = f"{dur:.1f}" if isinstance(dur, (int, float)) else "-"
+                call_short = str(call.get("call_id", "?"))[:10]
 
-            table.add_row(
-                str(step),
-                str(phase),
-                str(model)[:20],
-                str(ctx_tok),
-                dur_cell,
-                call_short,
-                key=row_key,
-            )
-            self._llm_row_to_idx[row_key] = global_idx
-        self._restore_left_table_state(table)
+                table.add_row(
+                    str(step),
+                    str(phase),
+                    str(model)[:20],
+                    str(ctx_tok),
+                    dur_cell,
+                    call_short,
+                    key=row_key,
+                )
+                self._llm_row_to_idx[row_key] = global_idx
+            self._restore_left_table_state(table)
+        finally:
+            self._suppress_table_row_selected_events = False
 
     def _render_async_table(self) -> None:
         table = self.query_one("#async-table", DataTable)
@@ -1280,23 +1276,27 @@ class AgentWorkbench(App):
         sig = (async_sig, self.state.selected_async_step, active_tab)
         if not self._should_render("table_async", sig, min_interval_s=0.25):
             return
-        self._capture_left_table_state(table)
-        table.clear(columns=False)
-        self._async_row_to_step.clear()
+        self._suppress_table_row_selected_events = True
+        try:
+            self._capture_left_table_state(table)
+            table.clear(columns=False)
+            self._async_row_to_step.clear()
 
-        for step in sorted(self.state.async_advice.keys()):
-            st = self.state.async_advice[step]
-            req = _fmt_ts(st.requested_ts)
-            ready = _fmt_ts(st.ready_ts)
-            lat = "-"
-            if isinstance(st.requested_ts, (int, float)) and isinstance(st.ready_ts, (int, float)):
-                lat = f"{(st.ready_ts - st.requested_ts) * 1000.0:.1f}"
-            used = "yes" if st.used_in_decision else ("no" if st.used_in_decision is False else "?")
-            call_short = (st.call_id or "")[:10] if st.call_id else "-"
-            row_key = str(step)
-            table.add_row(str(step), st.state, req, ready, lat, used, call_short, key=row_key)
-            self._async_row_to_step[row_key] = step
-        self._restore_left_table_state(table)
+            for step in sorted(self.state.async_advice.keys()):
+                st = self.state.async_advice[step]
+                req = _fmt_ts(st.requested_ts)
+                ready = _fmt_ts(st.ready_ts)
+                lat = "-"
+                if isinstance(st.requested_ts, (int, float)) and isinstance(st.ready_ts, (int, float)):
+                    lat = f"{(st.ready_ts - st.requested_ts) * 1000.0:.1f}"
+                used = "yes" if st.used_in_decision else ("no" if st.used_in_decision is False else "?")
+                call_short = (st.call_id or "")[:10] if st.call_id else "-"
+                row_key = str(step)
+                table.add_row(str(step), st.state, req, ready, lat, used, call_short, key=row_key)
+                self._async_row_to_step[row_key] = step
+            self._restore_left_table_state(table)
+        finally:
+            self._suppress_table_row_selected_events = False
 
     def _render_overview(self) -> None:
         events_tail = self.state.events[-500:]
@@ -2561,9 +2561,6 @@ class AgentWorkbench(App):
         self._emit_chat("Agent", self._answer_inspect_question(msg, snapshot), style="bold #7ddf8d")
 
     def _inspect_state_text(self) -> str:
-        selected_step = self.state.selected_step
-        if selected_step is None and self.state.base_steps:
-            selected_step = max(self.state.base_steps.keys())
         summary = {
             "run_id": self.state.run_id,
             "phase": self.state.phase,
@@ -2571,7 +2568,7 @@ class AgentWorkbench(App):
             "events": len(self.state.events),
             "steps": len(self.state.base_steps),
             "llm_calls": len(self.state.llm_calls),
-            "selected_step": selected_step,
+            "selected_step": self.state.selected_step,
             "selected_event_idx": self.state.selected_event_idx,
             "selected_llm_idx": self.state.selected_llm_idx,
             "best_iteration_ms": self.state.best_iteration_ms,
@@ -2729,6 +2726,14 @@ class AgentWorkbench(App):
         if not table_id:
             return
 
+        selected_key = self._selected_row_key_for_table(table_id)
+        if selected_key is not None:
+            try:
+                row_index = table.get_row_index(selected_key)
+                table.move_cursor(row=row_index, column=0, animate=False, scroll=False)
+            except Exception:
+                pass
+
         prev_scroll_y = self._left_scroll_y.get(table_id)
         if isinstance(prev_scroll_y, (int, float)):
             current_scroll_y = getattr(table, "scroll_y", None)
@@ -2738,6 +2743,17 @@ class AgentWorkbench(App):
                 table.scroll_to(y=float(prev_scroll_y), animate=False)
             except Exception:
                 pass
+
+    def _selected_row_key_for_table(self, table_id: str) -> Optional[str]:
+        if table_id == "events-table" and self.state.selected_event_idx is not None:
+            return str(self.state.selected_event_idx)
+        if table_id == "steps-table" and self.state.selected_step is not None:
+            return str(self.state.selected_step)
+        if table_id == "llm-table" and self.state.selected_llm_idx is not None:
+            return str(self.state.selected_llm_idx)
+        if table_id == "async-table" and self.state.selected_async_step is not None:
+            return str(self.state.selected_async_step)
+        return None
 
     def _emit_chat(self, who: str, text: str, *, style: str = "") -> None:
         log = self.query_one("#chat-log", RichLog)

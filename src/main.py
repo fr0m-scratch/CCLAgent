@@ -9,17 +9,23 @@ from .llm import create_llm_client, TracedLLMClient
 from .memory import MemoryStore
 from .RAG import RagStore
 from .tools import (
+    DebugPlaybook,
     ConfigCompiler,
     ExtNetBridge,
     ExtTunerBridge,
+    ExtTunerRuntimeConfig,
     MetricsCollector,
     MicrobenchConfig,
     MicrobenchRunner,
     NCCLInterface,
+    NcclDebugTool,
+    NcclDebugToolConfig,
     NcclTestConfig,
     NcclTestRunner,
     NumericSearchConfig,
     NumericSearchTool,
+    ProfilerCollector,
+    ProfilerConfig,
     SLAEnforcer,
     ToolSuite,
     TrainingJobConfig,
@@ -64,9 +70,40 @@ def build_tools(config, run_context: RunContext, dry_run: bool, simulate_workloa
     nccl = NCCLInterface(compiler)
     nccltest = NcclTestRunner(NcclTestConfig(dry_run=workload_sim), run_context=run_context)
     training = TrainingJobRunner(TrainingJobConfig(dry_run=workload_sim), run_context=run_context)
-    ext_tuner = ExtTunerBridge()
+    tuner_session_dir = artifact_path(run_context, config.plugins.tuner_session_dir)
+    if config.plugins.enable_tuner_plugin:
+        ext_tuner = ExtTunerBridge(
+            ExtTunerRuntimeConfig(
+                extra_env={
+                    "CCL_TUNER_PLUGIN_ENABLED": "1",
+                    "CCL_TUNER_SESSION_DIR": tuner_session_dir,
+                }
+            )
+        )
+    else:
+        ext_tuner = ExtTunerBridge()
     autoccl = ext_tuner
     ext_net = ExtNetBridge()
+    nccl_debug = NcclDebugTool(
+        NcclDebugToolConfig(
+            enabled=bool(config.observability.nccl_debug_enabled),
+            level=str(config.observability.nccl_debug_level),
+            subsystems=list(config.observability.nccl_debug_subsystems),
+            dump_topology=bool(config.observability.nccl_debug_dump_topology),
+            dump_graph=bool(config.observability.nccl_debug_dump_graph),
+        ),
+        run_context=run_context,
+    )
+    profiler = ProfilerCollector(
+        ProfilerConfig(
+            enabled=bool(config.observability.profiler_enabled or config.plugins.enable_profiler_plugin),
+            session_dir=artifact_path(run_context, config.plugins.profiler_session_dir),
+            dry_run=dry_run,
+            poll_interval_s=float(config.observability.profiler_poll_interval_s),
+            timeout_s=float(config.observability.profiler_timeout_s),
+        ),
+        run_context=run_context,
+    )
     numeric_search = NumericSearchTool(
         NumericSearchConfig(
             max_candidates=config.numeric_search.max_candidates,
@@ -87,6 +124,9 @@ def build_tools(config, run_context: RunContext, dry_run: bool, simulate_workloa
         ext_tuner=ext_tuner,
         ext_net=ext_net,
         numeric_search=numeric_search,
+        nccl_debug=nccl_debug,
+        profiler=profiler,
+        debug_playbook=DebugPlaybook(),
         run_context=run_context,
     )
 

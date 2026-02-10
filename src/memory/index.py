@@ -79,7 +79,20 @@ def recency_decay(timestamp: str | None, half_life_days: float) -> float:
 
 
 def rule_score(rule, context: Dict[str, Any], half_life_days: float) -> float:
+    if _is_expired(getattr(rule, "expiry_at", None)):
+        return 0.0
     similarity = context_similarity(rule.context, context)
     decay = recency_decay(rule.last_used or rule.created_at, half_life_days)
     quality = max(0.1, rule.success_rate) * rule.confidence
     return similarity * decay * quality
+
+
+def _is_expired(timestamp: str | None) -> bool:
+    if not timestamp:
+        return False
+    try:
+        expires = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        now = datetime.utcnow().astimezone(expires.tzinfo)
+        return now >= expires
+    except Exception:
+        return False

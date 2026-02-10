@@ -16,6 +16,7 @@ class TuningState:
     plateau_count: int = 0
     last_known_good: Optional[NCCLConfig] = None
     search_state: Any = None
+    evidence_store: Any = None
 
     def record(self, record: TuningRecord) -> None:
         self.history.append(record)

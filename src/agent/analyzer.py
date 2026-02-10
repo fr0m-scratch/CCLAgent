@@ -14,6 +14,8 @@ from ..types import (
 )
 from ..utils import artifact_path, setup_logger, write_json
 from ..trace import TraceEmitter, NullTraceEmitter
+from ..whitebox import Evidence, EvidenceStore
+from ..safety.rollback import RollbackManager
 from .decision_bundle import build_decision_bundle, validate_decision_bundle
 from .context_pack import build_context_pack, write_context_pack
 from .stop_policy import StopPolicy
@@ -34,6 +36,8 @@ class TuningAnalyzer:
         memory: Any | None = None,
         llm_advisor: Any | None = None,
         rag: Any | None = None,
+        evidence_store: EvidenceStore | None = None,
+        rollback_manager: RollbackManager | None = None,
     ):
         self.config = config
         self.hypothesis_generator = hypothesis_generator
@@ -45,6 +49,8 @@ class TuningAnalyzer:
         self.stop_policy = StopPolicy(config)
         self.llm_advisor = llm_advisor
         self.rag = rag
+        self.evidence_store = evidence_store
+        self.rollback_manager = rollback_manager or RollbackManager()
         self._online_rag_loaded = False
         self._online_rag_cache: List[Dict[str, Any]] = []
         self._online_rag_cache_meta: Dict[str, Any] = {}
@@ -186,6 +192,76 @@ class TuningAnalyzer:
         if llm_convergence:
             decision["llm_convergence"] = llm_convergence
             advice_used = True
+
+        failure_mode = None
+        if last_metrics is not None and isinstance(getattr(last_metrics, "raw", None), dict):
+            failure_mode = str(last_metrics.raw.get("failure_mode") or "").strip().lower() or None
+        if failure_mode in ("hang", "crash", "rank_mismatch", "regression"):
+            reason = f"failure_mode:{failure_mode}"
+            rb_decision = self.rollback_manager.decide(
+                failure_mode=failure_mode,
+                reason=reason,
+                current=base_config or (state.last_known_good or NCCLConfig(params={})),
+            )
+            if rb_decision.should_rollback and rb_decision.config is not None:
+                action = RollbackAction(kind="rollback", reason=reason, config=rb_decision.config)
+                decision["action"] = "rollback"
+                decision["failure_mode"] = failure_mode
+                decision["rollback_mode"] = rb_decision.mode
+                if rb_decision.changed_keys:
+                    decision["rollback_changed_keys"] = list(rb_decision.changed_keys)
+                self._persist(decision, step)
+                if self.run_context:
+                    write_json(
+                        artifact_path(self.run_context, "steps", f"step_{step}_rollback_decision.json"),
+                        {
+                            "schema_version": "1.0",
+                            "reason": reason,
+                            "mode": rb_decision.mode,
+                            "changed_keys": list(rb_decision.changed_keys),
+                            "config": rb_decision.config.params,
+                        },
+                    )
+                    self.trace.event(
+                        run_id=self.run_context.run_id,
+                        phase="online",
+                        step=step,
+                        actor="agent",
+                        type="safety.rollback",
+                        payload={
+                            "reason": reason,
+                            "mode": rb_decision.mode,
+                            "changed_keys": list(rb_decision.changed_keys),
+                        },
+                    )
+                self._write_decision_record(
+                    step,
+                    action,
+                    state,
+                    why_selected=[reason],
+                    why_rejected=[],
+                    advice=decision_advice,
+                )
+                _stamp_advice_state()
+                self._persist_llm_advice(step, advice, advice_used)
+                self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
+                return action
+            action = StopAction(kind="stop", reason=f"{reason}_without_rollback")
+            decision["action"] = "stop"
+            decision["failure_mode"] = failure_mode
+            self._persist(decision, step)
+            self._write_decision_record(
+                step,
+                action,
+                state,
+                why_selected=[action.reason],
+                why_rejected=[],
+                advice=decision_advice,
+            )
+            _stamp_advice_state()
+            self._persist_llm_advice(step, advice, advice_used)
+            self._persist_llm_convergence(step, explicit_convergence_advice, used=False)
+            return action
 
         if last_metrics and (not last_metrics.success or last_metrics.raw.get("sla_rollback")):
             if state.last_known_good is not None:
@@ -551,12 +627,15 @@ class TuningAnalyzer:
             selected_candidate = search_result.candidates[0]
         candidate_payload = [
             {
+                "candidate_id": str(getattr(c, "candidate_id", f"{step}_{idx}")),
+                "candidate_ref": f"candidate:{step}:{str(getattr(c, 'candidate_id', f'{step}_{idx}'))}",
                 "config": c.config.params,
                 "predicted_time_ms": c.predicted_time_ms,
                 "uncertainty": c.uncertainty,
                 "evaluation_mode": c.evaluation_mode,
+                "risk_score": self._safe_float(getattr(c, "risk_score", None)),
             }
-            for c in search_result.candidates
+            for idx, c in enumerate(search_result.candidates)
         ]
         action = NumericSearchAction(
             kind="numeric",
@@ -570,7 +649,9 @@ class TuningAnalyzer:
         self._persist(decision, step)
         selected_pred = self._safe_float(getattr(selected_candidate, "predicted_time_ms", None)) if selected_candidate else None
         selected_unc = self._safe_float(getattr(selected_candidate, "uncertainty", None)) if selected_candidate else None
-        selected_score_bits = [f"candidate:{selected_idx}"]
+        selected_candidate_id = str(getattr(selected_candidate, "candidate_id", f"{step}_{selected_idx}"))
+        selected_candidate_ref = f"candidate:{step}:{selected_candidate_id}"
+        selected_score_bits = [selected_candidate_ref]
         if selected_pred is not None:
             selected_score_bits.append(f"pred_ms={selected_pred:.3f}")
         if selected_unc is not None:
@@ -579,7 +660,7 @@ class TuningAnalyzer:
             {
                 "claim": "numeric search selected " + ", ".join(selected_score_bits),
                 "refs": [
-                    f"candidate:{step}:{selected_idx}",
+                    selected_candidate_ref,
                     f"steps/step_{step}_candidates_trace.json",
                 ],
                 "confidence": 0.75,
@@ -634,8 +715,6 @@ class TuningAnalyzer:
         if not self.run_context:
             return
         reason_refs = self._default_reason_refs(step, advice=advice)
-        selected_claims = self._claims_with_refs(why_selected, reason_refs)
-        rejected_claims = self._claims_with_refs(why_rejected, reason_refs)
         chosen_action = {
             "kind": getattr(action, "kind", None),
             "rationale": getattr(action, "rationale", None),
@@ -657,6 +736,17 @@ class TuningAnalyzer:
             "last_known_good": state.last_known_good.params if state.last_known_good else None,
             "last_known_good_ref": f"metric:{max(step - 1, 0)}:primary",
         }
+        evidence_refs = self._register_decision_evidence(
+            step=step,
+            chosen_action=chosen_action,
+            context_ref=context_ref,
+            constraints_snapshot=constraints_snapshot,
+            rollback_plan=rollback_plan,
+            candidates_considered=candidates_considered,
+        )
+        reason_refs = self._dedupe_refs(reason_refs + evidence_refs)
+        selected_claims = self._claims_with_refs(why_selected, reason_refs)
+        rejected_claims = self._claims_with_refs(why_rejected, reason_refs)
         record = {
             "schema_version": "1.0",
             "step": step,
@@ -698,11 +788,30 @@ class TuningAnalyzer:
         bundle_errors = validate_decision_bundle(bundle)
         if bundle_errors:
             bundle["quality_flags"] = sorted(set(bundle.get("quality_flags", []) + bundle_errors))
+        if candidates_considered and not selected_ref:
+            bundle["quality_flags"] = sorted(set(bundle.get("quality_flags", []) + ["missing_selected_candidate_ref"]))
         bundle_rel_path = f"steps/step_{step}_decision_bundle.json"
         write_json(
             artifact_path(self.run_context, "steps", f"step_{step}_decision_bundle.json"),
             bundle,
         )
+        bundle_evidence_ref = self._add_evidence(
+            kind="experiment",
+            source="analyzer.decision_bundle",
+            payload={
+                "step": step,
+                "path": bundle_rel_path,
+                "chosen_candidate_ref": selected_ref,
+                "quality_flags": bundle.get("quality_flags", []),
+            },
+        )
+        trace_refs = list(reason_refs)
+        if selected_ref:
+            trace_refs.append(str(selected_ref))
+        if bundle_evidence_ref:
+            trace_refs.append(bundle_evidence_ref)
+        if trace_refs:
+            trace_refs = list(dict.fromkeys(trace_refs))
         self.trace.event(
             run_id=self.run_context.run_id,
             phase="online",
@@ -714,7 +823,7 @@ class TuningAnalyzer:
                 "decision_bundle_path": bundle_rel_path,
                 "chosen_candidate_ref": selected_ref,
             },
-            refs=reason_refs,
+            refs=trace_refs,
             quality_flags=bundle.get("quality_flags", []),
         )
         top_claim = selected_claims[0]["claim"] if selected_claims else "no_explicit_claim"
@@ -727,6 +836,7 @@ class TuningAnalyzer:
             len(top_refs),
             bundle_rel_path,
         )
+        self._flush_evidence_store()
 
     def _is_decision_eligible_advice(self, advice: Any) -> bool:
         if advice is None:
@@ -785,15 +895,21 @@ class TuningAnalyzer:
                             selected_idx = idx
                             break
                 for idx, candidate in enumerate(candidates):
+                    candidate_id = str(getattr(candidate, "candidate_id", f"{step}_{idx}"))
+                    candidate_ref = f"candidate:{step}:{candidate_id}"
                     pred = getattr(candidate, "predicted_time_ms", None)
                     unc = getattr(candidate, "uncertainty", None)
+                    risk_score = getattr(candidate, "risk_score", None)
                     records.append(
                         {
-                            "candidate_ref": f"candidate:{step}:{idx}",
+                            "candidate_id": candidate_id,
+                            "candidate_ref": candidate_ref,
+                            "rank": idx + 1,
+                            "predicted_iteration_time_ms": self._safe_float(pred),
                             "score_breakdown": {
                                 "pred_time_ms": self._safe_float(pred),
                                 "uncertainty": self._safe_float(unc),
-                                "risk_score": None,
+                                "risk_score": self._safe_float(risk_score),
                                 "feasibility": 1.0,
                                 "final_rank_score": None,
                             },
@@ -807,7 +923,10 @@ class TuningAnalyzer:
             risk_score = getattr(compiled, "risk_score", None) if compiled is not None else None
             records.append(
                 {
+                    "candidate_id": "hypothesis",
                     "candidate_ref": f"candidate:{step}:hypothesis",
+                    "rank": 1,
+                    "predicted_iteration_time_ms": None,
                     "score_breakdown": {
                         "pred_time_ms": None,
                         "uncertainty": None,
@@ -823,7 +942,10 @@ class TuningAnalyzer:
         elif kind in ("stop", "rollback"):
             records.append(
                 {
+                    "candidate_id": kind,
                     "candidate_ref": f"candidate:{step}:{kind}",
+                    "rank": 1,
+                    "predicted_iteration_time_ms": None,
                     "score_breakdown": {
                         "pred_time_ms": None,
                         "uncertainty": None,
@@ -867,6 +989,87 @@ class TuningAnalyzer:
                 }
             )
         return out
+
+    def _add_evidence(self, *, kind: str, source: str, payload: dict[str, Any]) -> str:
+        if self.evidence_store is None:
+            return ""
+        evidence = Evidence(id="", kind=kind, source=source, payload=dict(payload))
+        return self.evidence_store.add_evidence(evidence)
+
+    def _flush_evidence_store(self) -> None:
+        if self.evidence_store is None or self.run_context is None:
+            return
+        try:
+            self.evidence_store.flush(self.run_context.artifacts_dir)
+        except Exception as exc:
+            logger.warning("Failed to flush analyzer evidence: %s", exc)
+
+    def _dedupe_refs(self, refs: list[str]) -> list[str]:
+        out: list[str] = []
+        for ref in refs:
+            text = str(ref or "").strip()
+            if not text or text in out:
+                continue
+            out.append(text)
+        return out
+
+    def _register_decision_evidence(
+        self,
+        *,
+        step: int,
+        chosen_action: dict[str, Any],
+        context_ref: str,
+        constraints_snapshot: dict[str, Any],
+        rollback_plan: dict[str, Any],
+        candidates_considered: list[dict],
+    ) -> list[str]:
+        refs: list[str] = []
+        decision_ref = self._add_evidence(
+            kind="experiment",
+            source="analyzer.decision",
+            payload={
+                "step": step,
+                "chosen_action": chosen_action,
+                "context_ref": context_ref,
+                "constraints_snapshot": constraints_snapshot,
+                "rollback_plan": rollback_plan,
+            },
+        )
+        if decision_ref:
+            refs.append(decision_ref)
+        candidates_ref = self._add_evidence(
+            kind="model",
+            source="analyzer.candidates",
+            payload={
+                "step": step,
+                "count": len(candidates_considered),
+                "candidates": candidates_considered,
+            },
+        )
+        if candidates_ref:
+            refs.append(candidates_ref)
+        selected = next(
+            (
+                item
+                for item in candidates_considered
+                if isinstance(item, dict) and item.get("status") == "selected"
+            ),
+            None,
+        )
+        if isinstance(selected, dict):
+            selected_ref = self._add_evidence(
+                kind="metric",
+                source="analyzer.selected_candidate",
+                payload={
+                    "step": step,
+                    "candidate_id": selected.get("candidate_id"),
+                    "candidate_ref": selected.get("candidate_ref"),
+                    "score_breakdown": selected.get("score_breakdown", {}),
+                },
+            )
+            if selected_ref:
+                refs.append(selected_ref)
+        return self._dedupe_refs(refs)
 
     def _extract_refs_from_claims(self, claims: Any) -> list[str]:
         refs: list[str] = []

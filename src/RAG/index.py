@@ -11,7 +11,7 @@ from ..types import RAGChunk
 from ..utils import tokenize
 
 
-ALLOWED_SUFFIXES = {".md", ".txt", ".json"}
+ALLOWED_SUFFIXES = {".md", ".txt", ".json", ".pdf"}
 
 
 @dataclass
@@ -67,9 +67,8 @@ def chunk_text(text: str, max_tokens: int = 200, overlap: int = 20) -> List[str]
 def build_chunks(paths: Iterable[str]) -> List[RAGChunk]:
     chunks: List[RAGChunk] = []
     for file_path in gather_documents(paths):
-        try:
-            text = file_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        text = _read_document_text(file_path)
+        if not text:
             continue
         for idx, chunk in enumerate(chunk_text(text)):
             chunks.append(
@@ -82,6 +81,38 @@ def build_chunks(paths: Iterable[str]) -> List[RAGChunk]:
                 )
             )
     return chunks
+
+
+def _read_document_text(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return _extract_pdf_text(path)
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ""
+    except Exception:
+        return ""
+
+
+def _extract_pdf_text(path: Path) -> str:
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return ""
+    try:
+        reader = PdfReader(str(path))
+    except Exception:
+        return ""
+    pages: List[str] = []
+    for page in reader.pages:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        if text.strip():
+            pages.append(text)
+    return "\n".join(pages)
 
 
 def save_index(index: RagIndex, index_path: str) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -19,6 +19,9 @@ class Rule:
     wins: int = 0
     confidence: float = 0.5
     rule_type: str = "positive"  # positive or avoid
+    applicability_signature: Dict[str, Any] = field(default_factory=dict)
+    claims: List[Dict[str, Any]] = field(default_factory=list)
+    expiry_at: Optional[str] = None
 
     @property
     def success_rate(self) -> float:

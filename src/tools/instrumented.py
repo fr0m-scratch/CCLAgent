@@ -110,7 +110,18 @@ def _infer_step(kwargs: Dict[str, Any], args: tuple) -> Optional[int]:
 def _infer_phase(tool_name: str) -> str:
     if tool_name in ("microbench",):
         return "offline"
-    if tool_name in ("training", "workload", "metrics", "sla", "compiler", "nccl", "numeric_search"):
+    if tool_name in (
+        "training",
+        "workload",
+        "metrics",
+        "sla",
+        "compiler",
+        "nccl",
+        "numeric_search",
+        "nccl_debug",
+        "profiler",
+        "debug_playbook",
+    ):
         return "online"
     return "system"
 

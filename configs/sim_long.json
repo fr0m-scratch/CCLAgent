@@ -11,6 +11,23 @@
   "execution": {
     "mode": "restart_per_step"
   },
+  "observability": {
+    "nccl_debug_enabled": true,
+    "nccl_debug_level": "INFO",
+    "nccl_debug_subsystems": ["INIT", "GRAPH", "NET", "TUNE"],
+    "nccl_debug_dump_topology": true,
+    "nccl_debug_dump_graph": true,
+    "profiler_enabled": true,
+    "profiler_poll_interval_s": 0.1,
+    "profiler_timeout_s": 0.5
+  },
+  "plugins": {
+    "enable_tuner_plugin": false,
+    "enable_profiler_plugin": true,
+    "tuner_session_dir": "plugins/session",
+    "profiler_session_dir": "plugins/profiler",
+    "protocol_timeout_s": 1.0
+  },
   "numeric_search": {
     "mode": "predict_only",
     "max_candidates": 8,

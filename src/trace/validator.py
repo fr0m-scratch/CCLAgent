@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .reader import read_events
+from ..whitebox import EvidenceStore, validate_contract
 
 
 CRITICAL_REF_EVENT_TYPES = {
@@ -37,10 +38,11 @@ class TraceValidationReport:
     total_events: int = 0
     schema_errors: List[str] = field(default_factory=list)
     ref_errors: List[str] = field(default_factory=list)
+    contract_violations: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.schema_errors and not self.ref_errors
+        return not self.schema_errors and not self.ref_errors and not self.contract_violations
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -48,6 +50,7 @@ class TraceValidationReport:
             "total_events": self.total_events,
             "schema_errors": list(self.schema_errors),
             "ref_errors": list(self.ref_errors),
+            "contract_violations": list(self.contract_violations),
             "ok": self.ok,
         }
 
@@ -103,6 +106,17 @@ def validate_trace_file(path: str | Path) -> TraceValidationReport:
         for error in ref_errors:
             report.ref_errors.append(f"line:{line_no}:{error}")
     return report
+
+
+def validate_whitebox_contract(run_dir: str | Path) -> List[str]:
+    run_dir = Path(run_dir)
+    trace_path = run_dir / "trace" / "events.jsonl"
+    if not trace_path.exists():
+        return ["missing_trace_file"]
+    events = list(read_events(str(trace_path)))
+    evidence_path = run_dir / "whitebox" / "evidence.jsonl"
+    store = EvidenceStore.from_jsonl(evidence_path)
+    return validate_contract(events, store)
 
 
 def _validate_string_list(value: Any, *, key: str) -> List[str]:

@@ -11,8 +11,10 @@ from .types import (
     MetricsConfig,
     MicrobenchSettings,
     NumericSearchSettings,
+    ObservabilitySettings,
     ParameterSpace,
     ParameterSpec,
+    PluginSettings,
     RagConfig,
     SafetyConfig,
     SurrogateConfig,
@@ -139,6 +141,8 @@ def default_agent_config(memory_path: str = "memory/agent_memory.json") -> Agent
     numeric_search = NumericSearchSettings()
     safety = SafetyConfig()
     execution = ExecutionConfig()
+    observability = ObservabilitySettings()
+    plugins = PluginSettings()
     surrogate = SurrogateConfig()
     llm = LLMSettings()
     warm_start = WarmStartSettings()
@@ -155,6 +159,8 @@ def default_agent_config(memory_path: str = "memory/agent_memory.json") -> Agent
         numeric_search=numeric_search,
         safety=safety,
         execution=execution,
+        observability=observability,
+        plugins=plugins,
         surrogate=surrogate,
         artifacts_root="artifacts",
         seed=7,
@@ -196,6 +202,8 @@ def load_agent_config(path: str) -> AgentConfig:
     numeric_search = _merge_dataclass(NumericSearchSettings(), payload.get("numeric_search", {}))
     safety = _merge_dataclass(SafetyConfig(), payload.get("safety", {}))
     execution = _merge_dataclass(ExecutionConfig(), payload.get("execution", {}))
+    observability = _merge_dataclass(ObservabilitySettings(), payload.get("observability", {}))
+    plugins = _merge_dataclass(PluginSettings(), payload.get("plugins", {}))
     surrogate = _merge_dataclass(SurrogateConfig(), payload.get("surrogate", {}))
     llm = _merge_dataclass(LLMSettings(), payload.get("llm", {}))
     warm_start = _merge_dataclass(WarmStartSettings(), payload.get("warm_start", {}))
@@ -217,6 +225,8 @@ def load_agent_config(path: str) -> AgentConfig:
         numeric_search=numeric_search,
         safety=safety,
         execution=execution,
+        observability=observability,
+        plugins=plugins,
         surrogate=surrogate,
         artifacts_root=payload.get("artifacts_root", "artifacts"),
         seed=payload.get("seed", 7),

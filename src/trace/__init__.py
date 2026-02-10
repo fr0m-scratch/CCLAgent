@@ -8,6 +8,7 @@ from .validator import (
     validate_event_refs,
     validate_event_schema,
     validate_trace_file,
+    validate_whitebox_contract,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "validate_event_refs",
     "validate_event_schema",
     "validate_trace_file",
+    "validate_whitebox_contract",
 ]

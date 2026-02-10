@@ -8,7 +8,7 @@ from ..types import METRICS_SCHEMA_VERSION, Metrics, MetricsConfig, RunContext
 from ..utils import artifact_path, write_json
 
 
-_NCCLTESTS_RE = re.compile(r"\s+([0-9.]+)\s+([0-9.]+)\s*$")
+_NCCLTESTS_DATA_PREFIX = re.compile(r"^\s*\d+")
 
 
 class MetricsCollector:
@@ -61,32 +61,76 @@ class MetricsCollector:
         return metrics
 
     def _parse_nccltests(self, raw_output: str) -> Metrics:
-        lines = [line.strip() for line in raw_output.splitlines() if line.strip()]
+        rows = self._parse_nccltests_rows(raw_output)
+        best = None
+        if rows:
+            rows.sort(key=lambda item: item["size_bytes"])
+            best = rows[-1]
+        iteration_time_ms = 0.0
         algbw = None
         busbw = None
-        for line in reversed(lines):
-            match = _NCCLTESTS_RE.search(line)
-            if not match:
-                continue
-            try:
-                algbw = float(match.group(1))
-                busbw = float(match.group(2))
-                break
-            except ValueError:
-                continue
-        iteration_time_ms = 0.0
+        if best is not None:
+            time_us = best.get("time_us")
+            if isinstance(time_us, float):
+                iteration_time_ms = time_us / 1000.0
+            algbw = best.get("algbw_gbps")
+            busbw = best.get("busbw_gbps")
         metrics = Metrics(
             iteration_time_ms=iteration_time_ms,
             algbw_gbps=algbw,
             busbw_gbps=busbw,
             success=True,
             failure_reason=None,
-            raw={"raw": raw_output, "parse": "nccltests_v1"},
+            raw={
+                "raw": raw_output,
+                "parse": "nccltests_v1",
+                "rows_parsed": len(rows),
+                "selected": best,
+            },
         )
         if metrics.iteration_time_ms <= 0.0 and not self.config.allow_missing_metrics:
             metrics.success = False
             metrics.failure_reason = "missing_iteration_time"
         return metrics
+
+    def _parse_nccltests_rows(self, raw_output: str) -> list[dict]:
+        rows: list[dict] = []
+        for line in raw_output.splitlines():
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            if not _NCCLTESTS_DATA_PREFIX.match(text):
+                continue
+            parts = text.split()
+            # Typical nccl-tests row:
+            # size count type redop root time algbw busbw [error]
+            if len(parts) < 8:
+                continue
+            try:
+                size_bytes = int(parts[0])
+            except ValueError:
+                continue
+            # Parse from the tail to tolerate varying middle columns.
+            busbw = _try_float(parts[-2]) if len(parts) >= 2 else None
+            algbw = _try_float(parts[-3]) if len(parts) >= 3 else None
+            time_us = _try_float(parts[-4]) if len(parts) >= 4 else None
+            if time_us is None and len(parts) >= 6:
+                # Fallback for atypical formatting.
+                time_us = _try_float(parts[5])
+            if algbw is None and len(parts) >= 7:
+                algbw = _try_float(parts[6])
+            if busbw is None and len(parts) >= 8:
+                busbw = _try_float(parts[7])
+            rows.append(
+                {
+                    "size_bytes": size_bytes,
+                    "time_us": time_us,
+                    "algbw_gbps": algbw,
+                    "busbw_gbps": busbw,
+                    "line": text,
+                }
+            )
+        return rows
 
     def save_metrics(self, metrics: Metrics, step: int) -> None:
         if not self.run_context:
@@ -101,3 +145,10 @@ class MetricsCollector:
         except FileNotFoundError:
             return None
         return self.parse(raw)
+
+
+def _try_float(text: str) -> float | None:
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None

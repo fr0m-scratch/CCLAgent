@@ -161,6 +161,7 @@ class OfflinePlanner:
                     "selected_id": offline_artifacts.warm_start_decision.selected_id,
                     "reason": offline_artifacts.warm_start_decision.reason,
                 },
+                refs=[f"candidate:offline:{offline_artifacts.warm_start_decision.selected_id}"],
             )
             if offline_artifacts.pruning:
                 self.trace.event(
@@ -173,6 +174,7 @@ class OfflinePlanner:
                         "count": len(offline_artifacts.pruning),
                         "params": [item.param for item in offline_artifacts.pruning],
                     },
+                    refs=["offline/search_space_pruning.json"],
                 )
         selected_id = offline_artifacts.warm_start_decision.selected_id
         selected_candidate = next(

@@ -40,6 +40,7 @@ from .metrics_derive import derive_metrics
 from ..memory.seed import inject_seed_rules
 from ..safety.risk import RiskBudgetState
 from ..models.calibration import build_interpretation
+from ..safety.rollback import RollbackManager
 from .hypothesis_tracker import (
     HypothesisPrediction, HypothesisVerdict, HypothesisScorecard,
     make_prediction, compute_verdict, build_scorecard,
@@ -54,6 +55,7 @@ from .warmstart import run_warm_start_program
 from .online_advisor import OnlineLLMAdvisor
 from .system_probe import SystemProbeCollector
 from ..trace import NullTraceEmitter, TraceEmitter
+from ..whitebox import Evidence, EvidenceStore
 
 
 logger = setup_logger("cclagent.agent")
@@ -87,6 +89,7 @@ class CCLAgent:
         self.run_context = run_context
         self.trace = trace or NullTraceEmitter()
         self._surrogate_records: list[tuple[NCCLConfig, float]] = []
+        self.evidence_store = EvidenceStore() if run_context is not None else None
         self.llm_advisor = OnlineLLMAdvisor(
             llm=self.llm,
             parameter_space=self.parameter_space,
@@ -134,6 +137,8 @@ class CCLAgent:
             memory=self.memory,
             llm_advisor=self.llm_advisor,
             rag=self.rag,
+            evidence_store=self.evidence_store,
+            rollback_manager=RollbackManager(),
         )
         self._mailbox_async_enabled = False
         self._mailbox_worker_stop = threading.Event()
@@ -158,6 +163,8 @@ class CCLAgent:
             simulate=bool(getattr(self.run_context, "dry_run", False)),
         )
         context = self.planner.build_context(workload, system_probe=probe.get("summary", {}))
+        if isinstance(getattr(context, "extra", None), dict):
+            context.extra["plugin_active"] = bool(getattr(self.config.plugins, "enable_tuner_plugin", False))
         self._load_surrogate(context)
         microbench = self.planner.offline_plan(workload)
         plan = self.planner.build_initial_plan(workload, microbench, context)
@@ -170,9 +177,10 @@ class CCLAgent:
         if warmstart_mode:
             warmstart_program["mode"] = warmstart_mode
 
+        warmstart_result = None
         warmstart_probes = []
         if warmstart_program.get("mode") == "series" and warmstart_program.get("candidates"):
-            selected_config, warmstart_probes = run_warm_start_program(
+            warmstart_result = run_warm_start_program(
                 program=warmstart_program,
                 defaults=self.parameter_space.default_config(),
                 workload=workload,
@@ -186,11 +194,17 @@ class CCLAgent:
                 eval_timeout_sec=self.config.warm_start.eval_timeout_sec,
                 concurrency=self.config.warm_start.concurrency,
             )
+            selected_config = warmstart_result.selected_config
+            warmstart_probes = list(warmstart_result.probes)
             initial_config = selected_config
             plan.baseline_config = selected_config
             if self.run_context:
                 write_json(artifact_path(self.run_context, "offline", "initial_plan.json"), asdict(plan))
-        state = TuningState(budget=self.config.budget)
+                self._persist_warm_start_final_decision(
+                    selected_config=selected_config,
+                    warmstart_result=warmstart_result,
+                )
+        state = TuningState(budget=self.config.budget, evidence_store=self.evidence_store)
         self._state = state
 
         if self.config.execution.mode == "in_job_ext_tuner" and self.run_context is not None:
@@ -206,6 +220,7 @@ class CCLAgent:
                 execution_mode="in_job_ext_tuner",
             )
             thread.join()
+            self._flush_evidence_store()
             return server.session.state
 
         last_metrics = None
@@ -278,6 +293,22 @@ class CCLAgent:
                         type="analysis.bottleneck.classify",
                         payload={"class": bottleneck, "confidence": confidence},
                     )
+                    failure_mode = metrics.raw.get("failure_mode")
+                    if failure_mode:
+                        self._trace_event(
+                            phase="online",
+                            step=step,
+                            actor="agent",
+                            type="analysis.failure_mode.classify",
+                            payload={
+                                "failure_mode": failure_mode,
+                                "severity": metrics.raw.get("failure_severity"),
+                                "confidence": metrics.raw.get("failure_confidence"),
+                                "reasons": metrics.raw.get("failure_reasons"),
+                                "policy_lane_hint": metrics.raw.get("policy_lane_hint"),
+                            },
+                            refs=[f"steps/step_{step}_failure_mode.json"],
+                        )
                 next_compiled = None
                 record = TuningRecord(
                     step=step,
@@ -294,7 +325,20 @@ class CCLAgent:
                 if not metrics.success:
                     self.memory.add_avoid_rule(context, action.config.params, evidence=metrics.raw)
                 if metrics.success:
+                    predicted_ms = None
+                    try:
+                        predicted_ms = self.surrogate.predict_one(action.config, context).mean
+                    except Exception:
+                        predicted_ms = None
                     self._update_surrogate(context, action.config, metrics.iteration_time_ms, step)
+                    try:
+                        self.numeric_manager.observe_outcome(
+                            config=action.config,
+                            observed_ms=metrics.iteration_time_ms,
+                            predicted_ms=predicted_ms,
+                        )
+                    except Exception:
+                        pass
 
                 # WP4: Hypothesis verdict
                 if pending_prediction is not None:
@@ -382,6 +426,7 @@ class CCLAgent:
             convergence_evidence=convergence_evidence,
         )
         self.memory.save()
+        self._flush_evidence_store()
         try:
             self.llm_advisor.shutdown()
         except Exception:
@@ -421,6 +466,101 @@ class CCLAgent:
             refs=refs,
             status=status,
         )
+
+    def _add_evidence(self, *, kind: str, source: str, payload: dict[str, Any]) -> str | None:
+        if self.evidence_store is None:
+            return None
+        evidence = Evidence(id="", kind=kind, source=source, payload=dict(payload))
+        return self.evidence_store.add_evidence(evidence)
+
+    def _flush_evidence_store(self) -> None:
+        if self.evidence_store is None or self.run_context is None:
+            return
+        try:
+            self.evidence_store.flush(self.run_context.artifacts_dir)
+        except Exception as exc:
+            logger.warning("Failed to flush evidence store: %s", exc)
+
+    def _safe_read_json(self, path: Path) -> dict[str, Any] | list[Any] | None:
+        try:
+            if not path.exists():
+                return None
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _persist_warm_start_final_decision(self, *, selected_config: NCCLConfig, warmstart_result: Any) -> None:
+        if not self.run_context:
+            return
+        offline_dir = Path(artifact_path(self.run_context, "offline"))
+        planned_decision = self._safe_read_json(offline_dir / "warm_start_decision.json")
+        planned_candidates = self._safe_read_json(offline_dir / "warm_start_candidates.json")
+        planned_selected_id = None
+        planned_config = None
+        if isinstance(planned_decision, dict):
+            planned_selected_id = planned_decision.get("selected_id")
+        if isinstance(planned_candidates, list) and planned_selected_id:
+            for item in planned_candidates:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("candidate_id") == planned_selected_id:
+                    cfg = item.get("config")
+                    if isinstance(cfg, dict):
+                        planned_config = cfg
+                    break
+
+        selected_probe = getattr(warmstart_result, "selected_probe", None)
+        probed_choice = None
+        if selected_probe is not None:
+            probed_choice = {
+                "selected_id": selected_probe.candidate_id,
+                "config": selected_probe.config,
+                "iteration_time_ms": selected_probe.iteration_time_ms,
+                "risk_score": selected_probe.risk_score,
+                "reason": selected_probe.reason,
+                "source": "warm_start_probe",
+            }
+        final_selected_id = selected_probe.candidate_id if selected_probe is not None else planned_selected_id
+        final_source = "warm_start_probe" if selected_probe is not None else "offline_plan"
+        payload = {
+            "schema_version": "1.0",
+            "planned_choice": {
+                "selected_id": planned_selected_id,
+                "config": planned_config,
+                "source": "offline_reasoner",
+            },
+            "probed_choice": probed_choice,
+            "final_baseline": {
+                "source": final_source,
+                "selected_id": final_selected_id,
+                "config": selected_config.params,
+            },
+        }
+        write_json(offline_dir / "warm_start_final_decision.json", payload)
+
+        report_path = offline_dir / "offline_report.json"
+        report = self._safe_read_json(report_path)
+        if not isinstance(report, dict):
+            report = {}
+        report.update(
+            {
+                "warm_start_selected": final_selected_id,
+                "warm_start_selected_source": final_source,
+                "warm_start_planned_selected": planned_selected_id,
+                "warm_start_probed_selected": selected_probe.candidate_id if selected_probe is not None else None,
+            }
+        )
+        write_json(report_path, report)
+        try:
+            (offline_dir / "offline_report.md").write_text(
+                "Offline report\n\n"
+                f"Selected warm start: {final_selected_id}\n"
+                f"Selected source: {final_source}\n"
+                f"Planned selected: {planned_selected_id}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     def _persist_step(self, record: TuningRecord, prev_config: NCCLConfig | None = None) -> None:
         if not self.run_context:
@@ -507,14 +647,29 @@ class CCLAgent:
             persist_rules("postrun/rules_distilled.jsonl", rules)
             persist_report("postrun/distillation_report.md", rules)
         if self.run_context:
-            for rule in rules:
+            for idx, rule in enumerate(rules):
+                rule_id = rule.get("rule_id")
+                ref = f"rule:{rule_id}" if rule_id else f"postrun:rule:{idx}"
+                evidence_ref = self._add_evidence(
+                    kind="experiment",
+                    source="postrun.distill",
+                    payload={
+                        "step": None,
+                        "rule_id": rule_id,
+                        "index": idx,
+                        "rule": rule,
+                    },
+                )
+                refs = [ref]
+                if evidence_ref:
+                    refs.append(evidence_ref)
                 self._trace_event(
                     phase="postrun",
                     step=None,
                     actor="agent",
                     type="postrun.distill.rule",
-                    payload={"rule_id": rule.get("rule_id")},
-                    refs=[],
+                    payload={"rule_id": rule_id},
+                    refs=refs,
                 )
         avoids = []
         for record in state.history:
@@ -587,6 +742,8 @@ class CCLAgent:
                 artifact_path(self.run_context, "postrun", "risk_budget_report.json"),
                 asdict(risk_budget),
             )
+
+        self._flush_evidence_store()
 
         # WP10: Run narrative
         try:

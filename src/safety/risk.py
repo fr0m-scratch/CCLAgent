@@ -134,6 +134,20 @@ class RiskScorer:
                         reasons.append("matches_avoid_rule")
                         break
 
+        if context is not None:
+            topology = str(getattr(context, "topology", "") or "").lower()
+            extra = getattr(context, "extra", {}) if hasattr(context, "extra") else {}
+            if topology in ("unknown", ""):
+                score += 0.05
+                reasons.append("topology_unknown")
+            if isinstance(extra, dict):
+                if bool(extra.get("plugin_active")):
+                    score += 0.1
+                    reasons.append("plugin_override_active")
+                if bool(extra.get("topology_signature_mismatch")):
+                    score += 0.3
+                    reasons.append("topology_signature_mismatch")
+
         risk_level = "low"
         if score >= 0.6:
             risk_level = "high"
@@ -191,6 +205,20 @@ class RiskScorer:
                         combo_risk += 0.3
                         components["avoid_rule_match"] = 0.3
                         break
+
+        if context is not None:
+            topology = str(getattr(context, "topology", "") or "").lower()
+            extra = getattr(context, "extra", {}) if hasattr(context, "extra") else {}
+            if topology in ("unknown", ""):
+                combo_risk += 0.05
+                components["topology_unknown"] = 0.05
+            if isinstance(extra, dict):
+                if bool(extra.get("plugin_active")):
+                    combo_risk += 0.1
+                    components["plugin_override_active"] = 0.1
+                if bool(extra.get("topology_signature_mismatch")):
+                    combo_risk += 0.3
+                    components["topology_signature_mismatch"] = 0.3
 
         # Novelty risk: how far from previously tested configs
         if memory_configs:

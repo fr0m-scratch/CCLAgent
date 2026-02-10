@@ -333,8 +333,10 @@ class SearchCandidate:
     config: NCCLConfig
     predicted_time_ms: float
     rationale: str
+    candidate_id: str = "unknown"
     evaluation_mode: str = "predict_only"
     uncertainty: float = 0.0
+    risk_score: Optional[float] = None
 
 
 @dataclass
@@ -394,7 +396,7 @@ class MetricsConfig:
 
 @dataclass
 class NumericSearchSettings:
-    mode: str = "predict_only"  # predict_only, real_eval
+    mode: str = "predict_only"  # predict_only, safe_bo, real_eval
     max_candidates: int = 8
     concurrency: int = 4
     short_eval_steps: int = 50
@@ -417,6 +419,27 @@ class SafetyConfig:
 class ExecutionConfig:
     mode: str = "restart_per_step"  # restart_per_step, in_job_ext_tuner
     allow_fallback: bool = True
+
+
+@dataclass
+class ObservabilitySettings:
+    nccl_debug_enabled: bool = False
+    nccl_debug_level: str = "INFO"
+    nccl_debug_subsystems: List[str] = field(default_factory=lambda: ["INIT", "GRAPH", "NET", "TUNE"])
+    nccl_debug_dump_topology: bool = True
+    nccl_debug_dump_graph: bool = True
+    profiler_enabled: bool = False
+    profiler_poll_interval_s: float = 0.1
+    profiler_timeout_s: float = 0.5
+
+
+@dataclass
+class PluginSettings:
+    enable_tuner_plugin: bool = False
+    enable_profiler_plugin: bool = False
+    tuner_session_dir: str = "plugins/session"
+    profiler_session_dir: str = "plugins/profiler"
+    protocol_timeout_s: float = 1.0
 
 
 @dataclass
@@ -477,6 +500,8 @@ class AgentConfig:
     safety: SafetyConfig
     execution: ExecutionConfig
     surrogate: SurrogateConfig
+    observability: ObservabilitySettings = field(default_factory=ObservabilitySettings)
+    plugins: PluginSettings = field(default_factory=PluginSettings)
     artifacts_root: str = "artifacts"
     seed: int = 7
     sla_max_iteration_time: Optional[float] = None
@@ -496,4 +521,7 @@ class ToolRegistry:
     ext_tuner: Any | None = None
     ext_net: Any | None = None
     numeric_search: Any | None = None
+    nccl_debug: Any | None = None
+    profiler: Any | None = None
+    debug_playbook: Any | None = None
     run_context: Optional[RunContext] = None

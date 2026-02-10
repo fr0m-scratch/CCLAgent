@@ -6,10 +6,10 @@ matches `WorkloadSpec` and supports a `metadata` object for additional context.
 
 Subfolders
 ----------
-- autoccl: Workloads mirroring the AutoCCL evaluation models.
+- benchmarks: Workloads mirroring the AutoCCL evaluation models.
 
 Usage
 -----
 - Dry run:
-  python3 -m src.main --workload workload/autoccl/phi2-2b.json --dry-run
+  python3 -m src.main --workload workload/benchmarks/phi2-2b.json --dry-run
 - Real run: fill `command` and `env` in the JSON spec with your launcher.

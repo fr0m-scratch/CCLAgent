@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from ..types import NCCLConfig, WorkloadSpec
 from ..utils import artifact_path, write_json
@@ -17,6 +17,13 @@ class WarmStartProbe:
     success: bool
     iteration_time_ms: float
     reason: str
+
+
+@dataclass
+class WarmStartResult:
+    selected_config: NCCLConfig
+    probes: List[WarmStartProbe]
+    selected_probe: Optional[WarmStartProbe]
 
 
 def _build_candidate_configs(program: Dict[str, Any], defaults: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -44,14 +51,14 @@ def run_warm_start_program(
     eval_steps: int = 50,
     eval_timeout_sec: int = 300,
     concurrency: int = 1,
-) -> Tuple[NCCLConfig, List[WarmStartProbe]]:
+) -> WarmStartResult:
     trace = trace or NullTraceEmitter()
     if not program or program.get("mode") != "series":
-        return NCCLConfig(params=defaults), []
+        return WarmStartResult(selected_config=NCCLConfig(params=defaults), probes=[], selected_probe=None)
 
     candidates = program.get("candidates", [])
     if not isinstance(candidates, list):
-        return NCCLConfig(params=defaults), []
+        return WarmStartResult(selected_config=NCCLConfig(params=defaults), probes=[], selected_probe=None)
     candidates = candidates[: max(1, max_candidates)]
 
     merged_configs = _build_candidate_configs({"candidates": candidates}, defaults)
@@ -70,7 +77,7 @@ def run_warm_start_program(
         valid_configs.append(NCCLConfig(params=cfg))
 
     if not valid_configs:
-        return NCCLConfig(params=defaults), []
+        return WarmStartResult(selected_config=NCCLConfig(params=defaults), probes=[], selected_probe=None)
 
     results = executor.run_batch(
         workload=workload,
@@ -153,4 +160,4 @@ def run_warm_start_program(
             },
             refs=[f"candidate:warmstart:{selected.candidate_id}"],
         )
-    return selected_config, probes
+    return WarmStartResult(selected_config=selected_config, probes=probes, selected_probe=selected)
